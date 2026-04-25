@@ -5,6 +5,7 @@ considered valid. Failed constraints = immediate rejection.
 """
 
 import subprocess
+import yaml
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
@@ -46,9 +47,34 @@ class ConstraintValidator:
         # 3. Non-empty
         results.append(self._check_non_empty(artifact_text))
 
-        # 4. Structural integrity
-        if artifact_type == "skill":
+        # 4. Structural integrity - only for full skill files, not body-only
+        if artifact_type == "skill" or artifact_type == "skill_file":
             results.append(self._check_skill_structure(artifact_text))
+
+        return results
+
+    def validate_skill(
+        self,
+        full_text: str,
+        body_text: str,
+        baseline_body_text: Optional[str] = None,
+    ) -> list[ConstraintResult]:
+        """Validate a skill with separated concerns.
+
+        - Runs _check_skill_structure() on full_text (structure only, no size/non-empty)
+        - Runs validate_all(body_text, "skill_body") for size/growth/non_empty checks
+        - Growth check uses baseline_body_text when provided
+        """
+        results = []
+
+        # Structure validation on full skill file (structure ONLY, not size/non-empty)
+        results.append(self._check_skill_structure(full_text))
+
+        # Size/growth/non_empty validation on body text
+        if baseline_body_text:
+            results.extend(self.validate_all(body_text, "skill_body", baseline_text=baseline_body_text))
+        else:
+            results.extend(self.validate_all(body_text, "skill_body"))
 
         return results
 
@@ -94,7 +120,7 @@ class ConstraintValidator:
 
     def _check_size(self, text: str, artifact_type: str) -> ConstraintResult:
         size = len(text)
-        if artifact_type == "skill":
+        if artifact_type == "skill" or artifact_type == "skill_file" or artifact_type == "skill_body":
             limit = self.config.max_skill_size
         elif artifact_type == "tool_description":
             limit = self.config.max_tool_desc_size
@@ -149,26 +175,75 @@ class ConstraintValidator:
 
     def _check_skill_structure(self, text: str) -> ConstraintResult:
         """Check that a skill file has valid YAML frontmatter and markdown body."""
-        has_frontmatter = text.strip().startswith("---")
-        has_name = "name:" in text[:500] if has_frontmatter else False
-        has_description = "description:" in text[:500] if has_frontmatter else False
-
-        if has_frontmatter and has_name and has_description:
-            return ConstraintResult(
-                passed=True,
-                constraint_name="skill_structure",
-                message="Skill has valid frontmatter (name + description)",
-            )
-        else:
-            missing = []
-            if not has_frontmatter:
-                missing.append("YAML frontmatter (---)")
-            if not has_name:
-                missing.append("name field")
-            if not has_description:
-                missing.append("description field")
+        if not text.strip().startswith("---"):
             return ConstraintResult(
                 passed=False,
                 constraint_name="skill_structure",
-                message=f"Skill missing: {', '.join(missing)}",
+                message="Skill missing: YAML frontmatter (---)",
+            )
+
+        try:
+            lines = text.split("\n")
+            if len(lines) < 3:
+                return ConstraintResult(
+                    passed=False,
+                    constraint_name="skill_structure",
+                    message="Skill missing: closing YAML frontmatter (---)",
+                )
+
+            if lines[0].strip() != "---":
+                return ConstraintResult(
+                    passed=False,
+                    constraint_name="skill_structure",
+                    message="Skill missing: YAML frontmatter (---)",
+                )
+
+            closing_idx = None
+            for i in range(1, len(lines)):
+                if lines[i].strip() == "---":
+                    closing_idx = i
+                    break
+
+            if closing_idx is None:
+                return ConstraintResult(
+                    passed=False,
+                    constraint_name="skill_structure",
+                    message="Skill missing: closing YAML frontmatter (---)",
+                )
+
+            frontmatter_text = "\n".join(lines[1:closing_idx])
+            frontmatter = yaml.safe_load(frontmatter_text)
+
+            if not isinstance(frontmatter, dict):
+                return ConstraintResult(
+                    passed=False,
+                    constraint_name="skill_structure",
+                    message="Skill missing: invalid frontmatter structure",
+                )
+
+            has_name = "name" in frontmatter and frontmatter["name"]
+            has_description = "description" in frontmatter and frontmatter["description"]
+
+            if has_name and has_description:
+                return ConstraintResult(
+                    passed=True,
+                    constraint_name="skill_structure",
+                    message="Skill has valid frontmatter (name + description)",
+                )
+            else:
+                missing = []
+                if not has_name:
+                    missing.append("name field")
+                if not has_description:
+                    missing.append("description field")
+                return ConstraintResult(
+                    passed=False,
+                    constraint_name="skill_structure",
+                    message=f"Skill missing: {', '.join(missing)}",
+                )
+        except yaml.YAMLError:
+            return ConstraintResult(
+                passed=False,
+                constraint_name="skill_structure",
+                message="Skill missing: invalid YAML in frontmatter",
             )
