@@ -59,7 +59,11 @@ def evolve(
     # ── 1. Find and load the skill ──────────────────────────────────────
     console.print(f"\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — Evolving skill: [bold]{skill_name}[/bold]\n")
 
-    resolved_hermes_path = config.resolve_hermes_agent_path()
+    try:
+        resolved_hermes_path = config.resolve_hermes_agent_path()
+    except FileNotFoundError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        sys.exit(1)
     skill_path = find_skill(skill_name, resolved_hermes_path)
     if not skill_path:
         console.print(f"[red]✗ Skill '{skill_name}' not found in {resolved_hermes_path / 'skills'}[/red]")

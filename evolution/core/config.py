@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 class EvolutionConfig:
     """Configuration for a self-evolution optimization run."""
 
-    # hermes-agent repo path — lazily resolved, None if not found
+    # hermes-agent repo path — lazily resolved via resolve_hermes_agent_path()
     hermes_agent_path: Path | None = None
 
     # Optimization parameters

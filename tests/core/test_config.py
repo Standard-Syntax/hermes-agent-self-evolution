@@ -29,14 +29,15 @@ class TestEvolutionConfigLazyPath:
         assert config.resolve_hermes_agent_path() == tmp_path
 
     def test_resolve_hermes_agent_path_raises_when_not_found(self, monkeypatch):
-        monkeypatch.delenv("HERMES_AGENT_REPO", raising=False)
-        monkeypatch.setattr("pathlib.Path.exists", lambda self: False)
+        def mock_fail():
+            raise FileNotFoundError("not found")
+
         monkeypatch.setattr(
             "evolution.core.config.get_hermes_agent_path",
-            lambda: (_ for _ in ()).throw(FileNotFoundError("not found")),
+            mock_fail,
         )
         config = EvolutionConfig()
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError, match="not found"):
             config.resolve_hermes_agent_path()
 
 
