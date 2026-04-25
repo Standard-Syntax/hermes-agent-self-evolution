@@ -1,0 +1,445 @@
+Review summary
+
+Phase 1 is partially implemented, but not complete enough to call production-ready. The repo has the right core files for Phase 1: config, constraints, dataset generation, external importers, scoring, skill wrapping, and the evolve_skill CLI. The README already labels Phase 1 as implemented, but the PLAN defines Phase 1 as done only when at least one skill improves by ≥10%, benchmark regression is within 2%, the diff is human-sensible, and the pipeline can be reused for any skill.  ￼  ￼
+
+The biggest issue is that Phase 1 currently looks like a prototype path, not a fully gated evolution pipeline.
+
+Main gaps to fix first
+
+1. Constraint validation is probably wrong for skills.
+    evolve_skill.py validates skill["body"] as artifact type "skill", but _check_skill_structure() expects full YAML frontmatter with name and description. That means the baseline/evolved body can fail structure checks even when the full SKILL.md is valid.  ￼  ￼
+2. --run-tests exists but is not actually used as a gate.
+    ConstraintValidator.run_test_suite() exists, but evolve_skill.py does not call it after generating the evolved skill.  ￼  ￼
+3. The README promises PR-style deployment, but the code only writes output files.
+    The repo says the pipeline produces a best variant through constraint gates and PR review, but current Phase 1 output is saved under output/<skill>/<timestamp>/; there is no branch creation, patch application, diff summary, or PR body generation yet.  ￼  ￼
+4. The SkillModule needs proof that GEPA is truly optimizing the skill text.
+    The wrapper stores skill_text as a plain module attribute and passes it as an input field to a predictor. Current DSPy GEPA docs describe GEPA as evolving textual components of DSPy programs through predictor traces and reflection, usually via dspy.GEPA(...).compile(student=..., trainset=..., valset=...); this repo should add an integration test proving the optimized program actually mutates the skill instructions instead of returning the baseline unchanged.  ￼  ￼
+5. The optimizer API should be verified.
+    Current DSPy docs show parameters like max_metric_calls and reflection_lm; the repo currently uses max_steps=iterations, so Phase 1 should include an API-compatibility check against the installed DSPy version.  ￼  ￼
+
+⸻
+
+Phase 1 completion plan
+
+Phase 1 target
+
+Complete Phase 1 when this command can reliably run:
+
+python -m evolution.skills.evolve_skill \
+  --skill github-code-review \
+  --iterations 10 \
+  --eval-source synthetic \
+  --run-tests
+
+And produce:
+
+output/<skill>/<timestamp>/
+  baseline_skill.md
+  evolved_skill.md
+  metrics.json
+  constraints.json
+  holdout_results.jsonl
+  diff.patch
+  pr_summary.md
+
+The result should only be marked “pass” when:
+
+- evolved holdout score improves by >= 10%
+- evolved skill passes size/growth/structure/semantic constraints
+- local repo tests pass
+- optional Hermes tests pass when --run-tests is enabled
+- optional TBLite gate stays within 2% regression
+- human-readable diff is generated
+
+⸻
+
+Slice P1-001 — Make config safe and testable
+
+Files
+
+evolution/core/config.py
+tests/core/test_config.py
+
+Changes
+
+Refactor EvolutionConfig so it does not eagerly fail if HERMES_AGENT_REPO is missing. Right now, EvolutionConfig() can call get_hermes_agent_path() immediately. That makes tests and dry-run workflows brittle.
+
+Recommended behavior:
+
+hermes_agent_path: Path | None = None
+
+Then resolve the path only when the command actually needs a Hermes repo.
+
+Done when
+
+pytest tests/core/test_config.py -q
+pytest tests/core/test_constraints.py -q
+
+passes without requiring a real ~/.hermes/hermes-agent.
+
+⸻
+
+Slice P1-002 — Fix skill parsing and constraint semantics
+
+Files
+
+evolution/skills/skill_module.py
+evolution/core/constraints.py
+tests/skills/test_skill_module.py
+tests/core/test_constraints.py
+
+Changes
+
+Separate these concerns:
+
+full SKILL.md structure validation
+body-only size validation
+body-only growth validation
+frontmatter YAML validation
+
+Do not call this:
+
+validator.validate_all(skill["body"], "skill")
+
+as if the body is the full skill file.
+
+Use one of these designs instead:
+
+validator.validate_skill(
+    full_text=skill["raw"],
+    body_text=skill["body"],
+    baseline_body_text=None,
+)
+
+or:
+
+validator.validate_all(skill["raw"], "skill_file")
+validator.validate_all(skill["body"], "skill_body")
+
+Also replace the current frontmatter string check with yaml.safe_load() because "name:" in text[:500] is too weak.
+
+Done when
+
+Tests prove:
+
+- valid full SKILL.md passes
+- body-only markdown passes body checks
+- missing frontmatter fails only structure validation
+- evolved body can be reassembled and then validated as a full SKILL.md
+
+⸻
+
+Slice P1-003 — Prove the SkillModule is actually optimizable
+
+Files
+
+evolution/skills/skill_module.py
+tests/skills/test_skill_module.py
+tests/skills/test_gepa_contract.py
+
+Changes
+
+Add an explicit contract test around optimization behavior. The test can use a fake optimizer or monkeypatched dspy.GEPA, but it must prove the Phase 1 pipeline extracts the optimized skill text from the optimized program, not accidentally from the original module.
+
+Target invariant:
+
+assert evolved_body != baseline_body
+assert "known mutation marker" in evolved_body
+
+Also consider renaming skill_text to skill_instructions everywhere for clarity.
+
+Done when
+
+There is a test that fails if optimized_module.skill_text stays unchanged or does not exist.
+
+⸻
+
+Slice P1-004 — Update GEPA integration to current DSPy usage
+
+Files
+
+evolution/skills/evolve_skill.py
+evolution/core/optimizer.py
+tests/skills/test_evolve_skill.py
+
+Changes
+
+Move GEPA setup out of evolve_skill.py into a small adapter:
+
+evolution/core/optimizer.py
+
+Recommended functions:
+
+def build_gepa_optimizer(config: EvolutionConfig) -> dspy.GEPA:
+    ...
+def compile_skill_module(
+    baseline_module: SkillModule,
+    trainset: list[dspy.Example],
+    valset: list[dspy.Example],
+    config: EvolutionConfig,
+) -> SkillModule:
+    ...
+
+Use current GEPA-style budget fields:
+
+dspy.GEPA(
+    metric=skill_fitness_metric,
+    max_metric_calls=config.max_metric_calls,
+    reflection_lm=dspy.LM(config.optimizer_model),
+)
+
+Keep backward compatibility only if needed, but do not silently fall back to MIPROv2 without recording that in metrics.json.
+
+Done when
+
+metrics.json records:
+
+{
+  "optimizer": "GEPA",
+  "optimizer_fallback_used": false,
+  "optimizer_model": "...",
+  "eval_model": "...",
+  "max_metric_calls": 150
+}
+
+⸻
+
+Slice P1-005 — Harden eval dataset generation
+
+Files
+
+evolution/core/dataset_builder.py
+evolution/core/external_importers.py
+tests/core/test_dataset_builder.py
+tests/core/test_external_importers.py
+
+Changes
+
+Add validation rules for generated examples:
+
+- task_input required
+- expected_behavior required
+- difficulty in easy/medium/hard
+- category required
+- no secrets
+- no duplicate task_input
+- minimum total examples
+- minimum holdout examples
+
+The external importer already has a strong start with secret detection and validation tests.  ￼ Extend the same discipline to synthetic and golden datasets.
+
+Add deterministic splitting:
+
+random.Random(config.seed).shuffle(examples)
+
+Do not use unseeded random.shuffle() in production eval splits.
+
+Done when
+
+Dataset generation creates stable train/val/holdout files for the same seed.
+
+⸻
+
+Slice P1-006 — Replace weak metric with feedback-rich scoring
+
+Files
+
+evolution/core/fitness.py
+tests/core/test_fitness.py
+
+Changes
+
+skill_fitness_metric() currently uses simple keyword overlap. That is fine for a smoke test, but too weak for Phase 1 completion.
+
+Create two modes:
+
+fast_metric        — cheap deterministic smoke metric
+judge_metric       — LLM-as-judge with structured feedback
+gepa_metric        — returns score plus textual feedback when trace is available
+
+GEPA performs best when the metric provides useful feedback, not just a scalar score; DSPy’s GEPA docs explicitly describe feedback-bearing metrics as part of the optimizer’s design.  ￼
+
+Done when
+
+Holdout evaluation can output:
+
+{
+  "task_input": "...",
+  "baseline_output": "...",
+  "evolved_output": "...",
+  "baseline_score": 0.62,
+  "evolved_score": 0.78,
+  "judge_feedback": "..."
+}
+
+⸻
+
+Slice P1-007 — Wire real gates into evolve_skill.py
+
+Files
+
+evolution/skills/evolve_skill.py
+evolution/core/constraints.py
+tests/skills/test_evolve_skill.py
+
+Changes
+
+Make the CLI enforce gates in order:
+
+1. load skill
+2. build/load dataset
+3. validate baseline full skill
+4. run baseline holdout
+5. optimize
+6. reassemble evolved SKILL.md
+7. validate evolved full skill
+8. run evolved holdout
+9. require improvement threshold
+10. run local tests
+11. optionally run Hermes tests
+12. optionally run benchmark gate
+13. write output bundle
+
+--run-tests must call the existing run_test_suite() method. If tests fail, still save artifacts, but mark the run as failed.
+
+Done when
+
+A failed test gate produces:
+
+{
+  "status": "failed",
+  "failed_gate": "test_suite",
+  "deployable": false
+}
+
+⸻
+
+Slice P1-008 — Add output artifacts and PR-ready summary
+
+Files
+
+evolution/core/artifacts.py
+evolution/skills/evolve_skill.py
+tests/core/test_artifacts.py
+
+Changes
+
+Create a dedicated artifact writer.
+
+Output:
+
+baseline_skill.md
+evolved_skill.md
+diff.patch
+metrics.json
+constraints.json
+holdout_results.jsonl
+run_config.json
+pr_summary.md
+
+pr_summary.md should include:
+
+- skill name
+- dataset source
+- train/val/holdout counts
+- baseline score
+- evolved score
+- improvement %
+- constraint results
+- test results
+- benchmark results if available
+- human review checklist
+
+This closes the gap between “saved output” and “reviewable improvement.”
+
+⸻
+
+Slice P1-009 — Add optional apply-to-Hermes branch workflow
+
+Files
+
+evolution/core/git_ops.py
+evolution/skills/evolve_skill.py
+tests/core/test_git_ops.py
+
+Changes
+
+Add a flag:
+
+--apply-to-branch
+
+Behavior:
+
+- create branch: evolution/<skill>/<timestamp>
+- replace the target SKILL.md
+- commit the change
+- write PR body to output folder
+
+Do not auto-open or auto-merge a PR in Phase 1 unless explicitly requested later.
+
+Done when
+
+The pipeline can create a local review branch, but still requires human review.
+
+⸻
+
+Slice P1-010 — Run the actual Phase 1 pilot
+
+Target skills
+
+Use the PLAN’s suggested first targets:
+
+github-code-review
+systematic-debugging
+arxiv
+
+The PLAN explicitly recommends starting with 2–3 well-used skills with clear success metrics.  ￼
+
+Run matrix
+
+python -m evolution.skills.evolve_skill \
+  --skill github-code-review \
+  --iterations 5 \
+  --eval-source synthetic
+python -m evolution.skills.evolve_skill \
+  --skill systematic-debugging \
+  --iterations 5 \
+  --eval-source synthetic
+python -m evolution.skills.evolve_skill \
+  --skill arxiv \
+  --iterations 5 \
+  --eval-source synthetic
+
+Then rerun the best candidate with:
+
+--iterations 10
+--run-tests
+
+Done when
+
+At least one skill has:
+
+- >= 10% holdout improvement
+- no failed constraints
+- no failed tests
+- human-readable evolved diff
+- reusable output bundle
+
+⸻
+
+Recommended task order
+
+P1-001 config safety
+P1-002 skill/constraint correctness
+P1-003 SkillModule optimization contract
+P1-004 GEPA adapter cleanup
+P1-005 dataset validation
+P1-006 feedback-rich metric
+P1-007 gate orchestration
+P1-008 artifact bundle
+P1-009 branch workflow
+P1-010 pilot runs
+
+Bottom line
+
+Do not start Phase 2 yet. Finish Phase 1 by turning the current prototype into a gated, reproducible skill-evolution pipeline. The most urgent fixes are the skill constraint bug, the unused --run-tests gate, the lack of proof that GEPA mutates the skill body, and the missing PR-ready artifact workflow.
