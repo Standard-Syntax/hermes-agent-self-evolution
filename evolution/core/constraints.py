@@ -48,7 +48,7 @@ class ConstraintValidator:
         results.append(self._check_non_empty(artifact_text))
 
         # 4. Structural integrity - only for full skill files, not body-only
-        if artifact_type == "skill" or artifact_type == "skill_file":
+        if artifact_type in ("skill", "skill_file"):
             results.append(self._check_skill_structure(artifact_text))
 
         return results
@@ -69,6 +69,9 @@ class ConstraintValidator:
 
         # Structure validation on full skill file (structure ONLY, not size/non-empty)
         results.append(self._check_skill_structure(full_text))
+
+        # Size validation on full skill file
+        results.append(self._check_size(full_text, "skill_file"))
 
         # Size/growth/non_empty validation on body text
         if baseline_body_text:
@@ -120,7 +123,7 @@ class ConstraintValidator:
 
     def _check_size(self, text: str, artifact_type: str) -> ConstraintResult:
         size = len(text)
-        if artifact_type == "skill" or artifact_type == "skill_file" or artifact_type == "skill_body":
+        if artifact_type in ("skill", "skill_file", "skill_body"):
             limit = self.config.max_skill_size
         elif artifact_type == "tool_description":
             limit = self.config.max_tool_desc_size
@@ -191,7 +194,7 @@ class ConstraintValidator:
                     message="Skill missing: closing YAML frontmatter (---)",
                 )
 
-            if lines[0].strip() != "---":
+            if lines[0] != "---":
                 return ConstraintResult(
                     passed=False,
                     constraint_name="skill_structure",
