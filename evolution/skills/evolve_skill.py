@@ -15,14 +15,14 @@ from typing import Optional
 import click
 import dspy
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 
-from evolution.core.config import EvolutionConfig, get_hermes_agent_path
+from evolution.core.config import EvolutionConfig
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
-from evolution.core.fitness import skill_fitness_metric, LLMJudge, FitnessScore
+from evolution.core.fitness import skill_fitness_metric
 from evolution.core.constraints import ConstraintValidator
+from evolution.core.optimizer import compile_skill_module
 from evolution.skills.skill_module import (
     SkillModule,
     load_skill,
@@ -48,6 +48,7 @@ def evolve(
 
     config = EvolutionConfig(
         iterations=iterations,
+        max_metric_calls=iterations,
         optimizer_model=optimizer_model,
         eval_model=eval_model,
         judge_model=eval_model,  # Use same model for dataset generation
@@ -59,7 +60,11 @@ def evolve(
     # ── 1. Find and load the skill ──────────────────────────────────────
     console.print(f"\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — Evolving skill: [bold]{skill_name}[/bold]\n")
 
-    resolved_hermes_path = config.resolve_hermes_agent_path()
+    try:
+        resolved_hermes_path = config.resolve_hermes_agent_path()
+    except FileNotFoundError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        sys.exit(1)
     skill_path = find_skill(skill_name, resolved_hermes_path)
     if not skill_path:
         console.print(f"[red]✗ Skill '{skill_name}' not found in {resolved_hermes_path / 'skills'}[/red]")
@@ -72,10 +77,10 @@ def evolve(
     console.print(f"  Description: {skill['description'][:80]}...")
 
     if dry_run:
-        console.print(f"\n[bold green]DRY RUN — setup validated successfully.[/bold green]")
+        console.print("\n[bold green]DRY RUN — setup validated successfully.[/bold green]")
         console.print(f"  Would generate eval dataset (source: {eval_source})")
         console.print(f"  Would run GEPA optimization ({iterations} iterations)")
-        console.print(f"  Would validate constraints and create PR")
+        console.print("  Would validate constraints and create PR")
         return
 
     # ── 2. Build or load evaluation dataset ─────────────────────────────
@@ -118,9 +123,9 @@ def evolve(
     console.print(f"  Split: {len(dataset.train)} train / {len(dataset.val)} val / {len(dataset.holdout)} holdout")
 
     # ── 3. Validate constraints on baseline ─────────────────────────────
-    console.print(f"\n[bold]Validating baseline constraints[/bold]")
+    console.print("\n[bold]Validating baseline constraints[/bold]")
     validator = ConstraintValidator(config)
-    baseline_constraints = validator.validate_all(skill["body"], "skill")
+    baseline_constraints = validator.validate_skill(skill["raw"], skill["body"])
     all_pass = True
     for c in baseline_constraints:
         icon = "✓" if c.passed else "✗"
@@ -133,7 +138,7 @@ def evolve(
         console.print("[yellow]⚠ Baseline skill has constraint violations — proceeding anyway[/yellow]")
 
     # ── 4. Set up DSPy + GEPA optimizer ─────────────────────────────────
-    console.print(f"\n[bold]Configuring optimizer[/bold]")
+    console.print("\n[bold]Configuring optimizer[/bold]")
     console.print(f"  Optimizer: GEPA ({iterations} iterations)")
     console.print(f"  Optimizer model: {optimizer_model}")
     console.print(f"  Eval model: {eval_model}")
@@ -154,28 +159,15 @@ def evolve(
 
     start_time = time.time()
 
-    try:
-        optimizer = dspy.GEPA(
-            metric=skill_fitness_metric,
-            max_steps=iterations,
-        )
+    optimized_module, optimizer_fallback_used = compile_skill_module(
+        baseline_module,
+        trainset,
+        valset,
+        config,
+    )
 
-        optimized_module = optimizer.compile(
-            baseline_module,
-            trainset=trainset,
-            valset=valset,
-        )
-    except Exception as e:
-        # Fall back to MIPROv2 if GEPA isn't available in this DSPy version
-        console.print(f"[yellow]GEPA not available ({e}), falling back to MIPROv2[/yellow]")
-        optimizer = dspy.MIPROv2(
-            metric=skill_fitness_metric,
-            auto="light",
-        )
-        optimized_module = optimizer.compile(
-            baseline_module,
-            trainset=trainset,
-        )
+    if optimizer_fallback_used:
+        console.print("[yellow]GEPA not available, falling back to MIPROv2[/yellow]")
 
     elapsed = time.time() - start_time
     console.print(f"\n  Optimization completed in {elapsed:.1f}s")
@@ -186,8 +178,8 @@ def evolve(
     evolved_full = reassemble_skill(skill["frontmatter"], evolved_body)
 
     # ── 7. Validate evolved skill ───────────────────────────────────────
-    console.print(f"\n[bold]Validating evolved skill[/bold]")
-    evolved_constraints = validator.validate_all(evolved_body, "skill", baseline_text=skill["body"])
+    console.print("\n[bold]Validating evolved skill[/bold]")
+    evolved_constraints = validator.validate_skill(evolved_full, evolved_body, baseline_body_text=skill["body"])
     all_pass = True
     for c in evolved_constraints:
         icon = "✓" if c.passed else "✗"
@@ -269,8 +261,11 @@ def evolve(
         "skill_name": skill_name,
         "timestamp": timestamp,
         "iterations": iterations,
+        "optimizer": "GEPA",
+        "optimizer_fallback_used": optimizer_fallback_used,
         "optimizer_model": optimizer_model,
         "eval_model": eval_model,
+        "max_metric_calls": config.max_metric_calls,
         "baseline_score": avg_baseline,
         "evolved_score": avg_evolved,
         "improvement": improvement,
