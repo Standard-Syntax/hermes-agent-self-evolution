@@ -21,6 +21,9 @@ class EvolutionConfig:
     eval_model: str = "openai/gpt-4.1-mini"  # Model for LLM-as-judge scoring
     judge_model: str = "openai/gpt-4.1"  # Model for dataset generation
 
+    # GEPA optimizer budget (exactly one of: auto, max_full_evals, or max_metric_calls)
+    max_metric_calls: int = 150
+
     # Constraints
     max_skill_size: int = 15_000  # 15KB default
     max_tool_desc_size: int = 500  # chars

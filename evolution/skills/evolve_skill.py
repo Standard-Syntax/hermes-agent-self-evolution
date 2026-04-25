@@ -22,6 +22,7 @@ from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset,
 from evolution.core.external_importers import build_dataset_from_external
 from evolution.core.fitness import skill_fitness_metric
 from evolution.core.constraints import ConstraintValidator
+from evolution.core.optimizer import compile_skill_module
 from evolution.skills.skill_module import (
     SkillModule,
     load_skill,
@@ -153,28 +154,15 @@ def evolve(
 
     start_time = time.time()
 
-    try:
-        optimizer = dspy.GEPA(
-            metric=skill_fitness_metric,
-            max_steps=iterations,
-        )
+    optimized_module, optimizer_fallback_used = compile_skill_module(
+        baseline_module,
+        trainset,
+        valset,
+        config,
+    )
 
-        optimized_module = optimizer.compile(
-            baseline_module,
-            trainset=trainset,
-            valset=valset,
-        )
-    except Exception as e:
-        # Fall back to MIPROv2 if GEPA isn't available in this DSPy version
-        console.print(f"[yellow]GEPA not available ({e}), falling back to MIPROv2[/yellow]")
-        optimizer = dspy.MIPROv2(
-            metric=skill_fitness_metric,
-            auto="light",
-        )
-        optimized_module = optimizer.compile(
-            baseline_module,
-            trainset=trainset,
-        )
+    if optimizer_fallback_used:
+        console.print("[yellow]GEPA not available, falling back to MIPROv2[/yellow]")
 
     elapsed = time.time() - start_time
     console.print(f"\n  Optimization completed in {elapsed:.1f}s")
@@ -268,8 +256,11 @@ def evolve(
         "skill_name": skill_name,
         "timestamp": timestamp,
         "iterations": iterations,
+        "optimizer": "GEPA",
+        "optimizer_fallback_used": optimizer_fallback_used,
         "optimizer_model": optimizer_model,
         "eval_model": eval_model,
+        "max_metric_calls": config.max_metric_calls,
         "baseline_score": avg_baseline,
         "evolved_score": avg_evolved,
         "improvement": improvement,
