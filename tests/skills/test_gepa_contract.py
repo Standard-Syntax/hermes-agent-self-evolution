@@ -20,20 +20,16 @@ MUTATION_MARKER = "\n\n[MUTATED BY GEPA]"
 BASELINE_BODY = "# Original Skill\n\nDo the original procedure."
 
 
-class MockOptimizedModule:
+class MockOptimizedModule(dspy.Module):
     """A mock module that simulates GEPA's mutation behavior.
 
     GEPA should mutate the skill_text attribute to produce an evolved version.
     """
 
     def __init__(self, original_module: SkillModule, mutated_skill_text: str):
-        for attr in dir(original_module):
-            if not attr.startswith("_"):
-                try:
-                    setattr(self, attr, getattr(original_module, attr))
-                except AttributeError:
-                    pass
+        super().__init__()
         self.skill_text = mutated_skill_text
+        self.predictor = getattr(original_module, "predictor", None)
 
     def forward(self, task_input: str):
         return dspy.Prediction(output="mock output")
@@ -48,11 +44,10 @@ class MockGEPA:
         evolved_body = optimized_module.skill_text
     """
 
-    def __init__(self, metric, *, auto=None, max_metric_calls=None, max_full_evals=None):
+    def __init__(self, metric, **kwargs):
         self.metric = metric
-        self.auto = auto
-        self.max_metric_calls = max_metric_calls
-        self.max_full_evals = max_full_evals
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
     def compile(self, module, *, trainset=None, valset=None):
         return MockOptimizedModule(module, module.skill_text + MUTATION_MARKER)
@@ -72,7 +67,7 @@ def test_gepa_mutation_proof():
     assert baseline_module.skill_text == BASELINE_BODY
 
     with mock.patch.object(dspy, "GEPA", MockGEPA):
-        optimizer = dspy.GEPA(metric=lambda *args: 1.0, auto="light")
+        optimizer = dspy.GEPA(metric=lambda *args: 1.0, max_metric_calls=1)
         optimized_module = optimizer.compile(
             baseline_module,
             trainset=[],
