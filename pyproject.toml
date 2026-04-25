@@ -28,7 +28,7 @@ dev = [
     "pytest-asyncio>=0.21",
 ]
 darwinian = [
-    "darwinian-evolver",
+    # "darwinian-evolver",  # TODO: fix - package not on PyPI
 ]
 
 [project.urls]
