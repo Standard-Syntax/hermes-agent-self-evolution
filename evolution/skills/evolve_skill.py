@@ -59,13 +59,14 @@ def evolve(
     # ── 1. Find and load the skill ──────────────────────────────────────
     console.print(f"\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — Evolving skill: [bold]{skill_name}[/bold]\n")
 
-    skill_path = find_skill(skill_name, config.hermes_agent_path)
+    resolved_hermes_path = config.resolve_hermes_agent_path()
+    skill_path = find_skill(skill_name, resolved_hermes_path)
     if not skill_path:
-        console.print(f"[red]✗ Skill '{skill_name}' not found in {config.hermes_agent_path / 'skills'}[/red]")
+        console.print(f"[red]✗ Skill '{skill_name}' not found in {resolved_hermes_path / 'skills'}[/red]")
         sys.exit(1)
 
     skill = load_skill(skill_path)
-    console.print(f"  Loaded: {skill_path.relative_to(config.hermes_agent_path)}")
+    console.print(f"  Loaded: {skill_path.relative_to(resolved_hermes_path)}")
     console.print(f"  Name: {skill['name']}")
     console.print(f"  Size: {len(skill['raw']):,} chars")
     console.print(f"  Description: {skill['description'][:80]}...")

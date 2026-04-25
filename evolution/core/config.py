@@ -3,15 +3,14 @@
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
 class EvolutionConfig:
     """Configuration for a self-evolution optimization run."""
 
-    # hermes-agent repo path
-    hermes_agent_path: Path = field(default_factory=lambda: get_hermes_agent_path())
+    # hermes-agent repo path — lazily resolved, None if not found
+    hermes_agent_path: Path | None = None
 
     # Optimization parameters
     iterations: int = 10
@@ -42,6 +41,16 @@ class EvolutionConfig:
     # Output
     output_dir: Path = field(default_factory=lambda: Path("./output"))
     create_pr: bool = True
+
+    def resolve_hermes_agent_path(self) -> Path:
+        """Resolve hermes_agent_path, discovering if not set.
+
+        Raises FileNotFoundError if no hermes-agent repo can be found.
+        """
+        if self.hermes_agent_path is not None:
+            return self.hermes_agent_path
+        self.hermes_agent_path = get_hermes_agent_path()
+        return self.hermes_agent_path
 
 
 def get_hermes_agent_path() -> Path:
