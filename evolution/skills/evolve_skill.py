@@ -20,7 +20,7 @@ from rich.table import Table
 from evolution.core.config import EvolutionConfig
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
-from evolution.core.fitness import skill_fitness_metric
+from evolution.core.fitness import run_holdout_evaluation
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.optimizer import compile_skill_module
 from evolution.skills.skill_module import (
@@ -204,16 +204,28 @@ def evolve(
 
     baseline_scores = []
     evolved_scores = []
+    all_judge_feedback = []
     for ex in holdout_examples:
-        # Score baseline
+        # Score baseline and evolved using LLM judge
         with dspy.context(lm=lm):
             baseline_pred = baseline_module(task_input=ex.task_input)
-            baseline_score = skill_fitness_metric(ex, baseline_pred)
-            baseline_scores.append(baseline_score)
+            baseline_output = baseline_pred.output
 
             evolved_pred = optimized_module(task_input=ex.task_input)
-            evolved_score = skill_fitness_metric(ex, evolved_pred)
-            evolved_scores.append(evolved_score)
+            evolved_output = evolved_pred.output
+
+            result = run_holdout_evaluation(
+                baseline_output=baseline_output,
+                evolved_output=evolved_output,
+                task_input=ex.task_input,
+                expected_behavior=ex.expected_behavior,
+                skill_text=optimized_module.skill_text,
+                config=config,
+            )
+
+            baseline_scores.append(result["baseline_score"])
+            evolved_scores.append(result["evolved_score"])
+            all_judge_feedback.append(result["judge_feedback"])
 
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))
@@ -278,6 +290,15 @@ def evolve(
         "constraints_passed": all_pass,
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    # Save detailed judge feedback per example
+    (output_dir / "judge_feedback.md").write_text(
+        "# Holdout Evaluation Judge Feedback\n\n"
+        + "\n\n---\n\n".join(
+            f"## Example {i+1}\n\n{fb}"
+            for i, fb in enumerate(all_judge_feedback)
+        )
+    )
 
     console.print(f"\n  Output saved to {output_dir}/")
 
