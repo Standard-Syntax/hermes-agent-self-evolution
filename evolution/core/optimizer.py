@@ -4,6 +4,8 @@ Provides a clean interface for building GEPA optimizers with the current DSPy AP
 handling version compatibility and fallback to MIPROv2 when GEPA is unavailable.
 """
 
+import functools
+
 import dspy
 
 from evolution.core.config import EvolutionConfig
@@ -11,6 +13,7 @@ from evolution.core.fitness import skill_fitness_metric
 from evolution.skills.skill_module import SkillModule
 
 
+@functools.lru_cache(maxsize=1)
 def _gepa_available() -> bool:
     """Check if GEPA is available in this DSPy version."""
     try:
@@ -73,6 +76,7 @@ def compile_skill_module(
         optimized_module = optimizer.compile(
             baseline_module,
             trainset=trainset,
+            valset=valset,
         )
         return optimized_module, True  # Fallback was used
 

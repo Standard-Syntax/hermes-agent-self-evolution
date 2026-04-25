@@ -6,9 +6,11 @@ These tests verify:
 3. Metrics are properly recorded including optimizer_fallback_used
 """
 
+from pathlib import Path
 from unittest import mock
 
 import dspy
+import pytest
 
 from evolution.core.config import EvolutionConfig
 from evolution.core.dataset_builder import EvalDataset, EvalExample
@@ -509,4 +511,33 @@ class TestGepaAdapterExists:
 
         assert hasattr(optimizer, "_gepa_available"), (
             "evolution.core.optimizer must have _gepa_available function"
+        )
+
+
+class TestEvolutionConfigIterationsBudget:
+    """Tests that CLI --iterations correctly sets GEPA budget (max_metric_calls).
+
+    PR #4 Review Comment [HIGH]: Discrepancy between CLI `iterations` and
+    optimizer budget `max_metric_calls`. When user specifies `--iterations 10`,
+    GEPA still uses `max_metric_calls=150` (default). Fix: set
+    `max_metric_calls=iterations` in `EvolutionConfig` initialization.
+
+    The fix is verified via source code inspection since evolve() is the
+    actual code path and EvolutionConfig is a dataclass.
+    """
+
+    def test_evolve_source_code_passes_max_metric_calls_equal_to_iterations(self):
+        """Verify evolve() creates EvolutionConfig with max_metric_calls=iterations.
+
+        This is verified by inspecting the source code of evolve_skill.evolve().
+        The line should be:
+            config = EvolutionConfig(..., max_metric_calls=iterations, ...)
+        """
+        import inspect
+        from evolution.skills.evolve_skill import evolve
+
+        source = inspect.getsource(evolve)
+        assert 'max_metric_calls=iterations' in source, (
+            "evolve() should pass max_metric_calls=iterations to EvolutionConfig. "
+            "Source should contain: config = EvolutionConfig(..., max_metric_calls=iterations, ...)"
         )
