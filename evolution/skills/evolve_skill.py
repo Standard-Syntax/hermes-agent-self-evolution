@@ -48,6 +48,7 @@ def evolve(
 
     config = EvolutionConfig(
         iterations=iterations,
+        max_metric_calls=iterations,
         optimizer_model=optimizer_model,
         eval_model=eval_model,
         judge_model=eval_model,  # Use same model for dataset generation
