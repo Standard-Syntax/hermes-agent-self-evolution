@@ -22,11 +22,9 @@ import pytest
 from evolution.core.config import EvolutionConfig
 from evolution.core.dataset_builder import (
     EvalExample,
-    EvalDataset,
     SyntheticDatasetBuilder,
     GoldenDatasetLoader,
 )
-from evolution.core.external_importers import _contains_secret
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -94,7 +92,6 @@ class TestDeterministicSplitting:
         examples = [make_example(task_input=f"task {i}") for i in range(20)]
         write_golden_jsonl(tmp_path / "golden.jsonl", examples)
 
-        config = EvolutionConfig(seed=99)
         loader = GoldenDatasetLoader()
 
         dataset1 = loader.load(tmp_path)
@@ -112,11 +109,9 @@ class TestDeterministicSplitting:
 
         config_a = EvolutionConfig(seed=111)
         config_b = EvolutionConfig(seed=222)
-        loader_a = GoldenDatasetLoader()
-        loader_b = GoldenDatasetLoader()
 
-        dataset_a = loader_a.load(tmp_path)
-        dataset_b = loader_b.load(tmp_path)
+        dataset_a = GoldenDatasetLoader.load(tmp_path, config_a)
+        dataset_b = GoldenDatasetLoader.load(tmp_path, config_b)
 
         # At least one split should differ
         train_a = [ex.task_input for ex in dataset_a.train]
@@ -370,7 +365,6 @@ class TestMinimumExampleCount:
             EvalExample(**d) for d in raw
         ])
 
-        config = EvolutionConfig(seed=1, eval_dataset_size=20)
         dataset = GoldenDatasetLoader.load(tmp_path)
 
         # Only 2 valid examples remain — should still produce splits

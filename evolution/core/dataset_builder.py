@@ -8,6 +8,7 @@ C) Golden sets — hand-curated JSONL files
 
 import json
 import random
+import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
@@ -15,6 +16,65 @@ from typing import Optional
 import dspy
 
 from evolution.core.config import EvolutionConfig
+
+
+SECRET_PATTERNS = re.compile(
+    r'('
+    r'sk-ant-api\S+'
+    r'|sk-or-v1-\S+'
+    r'|sk-\S{20,}'
+    r'|ghp_\S+'
+    r'|ghu_\S+'
+    r'|xoxb-\S+'
+    r'|xapp-\S+'
+    r'|ntn_\S+'
+    r'|AKIA[0-9A-Z]{16}'
+    r'|Bearer\s+\S{20,}'
+    r'|-----BEGIN\s+(RSA\s+)?PRIVATE\sKEY-----'
+    r'|ANTHROPIC_API_KEY'
+    r'|OPENAI_API_KEY'
+    r'|OPENROUTER_API_KEY'
+    r'|SLACK_BOT_TOKEN'
+    r'|GITHUB_TOKEN'
+    r'|AWS_SECRET_ACCESS_KEY'
+    r'|DATABASE_URL'
+    r'|\bpassword\s*[=:]\s*\S+'
+    r'|\bsecret\s*[=:]\s*\S+'
+    r'|\btoken\s*[=:]\s*\S{10,}'
+    r')',
+    re.IGNORECASE,
+)
+
+VALID_DIFFICULTIES = {"easy", "medium", "hard"}
+
+
+def _contains_secret(text: str) -> bool:
+    return bool(SECRET_PATTERNS.search(text))
+
+
+def _validate_eval_example(
+    task_input: str,
+    expected_behavior: str,
+    difficulty: str,
+    category: str,
+) -> Optional[dict]:
+    if not task_input or not task_input.strip():
+        return None
+    if not expected_behavior or not expected_behavior.strip():
+        return None
+    difficulty = difficulty.strip().lower() if difficulty else "medium"
+    if difficulty not in VALID_DIFFICULTIES:
+        difficulty = "medium"
+    category = category.strip() if category else "general"
+    if not category:
+        category = "general"
+    task_input = task_input.strip()[:2000]
+    return {
+        "task_input": task_input,
+        "expected_behavior": expected_behavior.strip(),
+        "difficulty": difficulty,
+        "category": category,
+    }
 
 
 @dataclass
@@ -86,48 +146,37 @@ class EvalDataset:
         ]
 
 
-def validate_examples(examples: list[EvalExample], min_holdout: int = 1) -> list[EvalExample]:
+def validate_examples(examples: list[EvalExample]) -> list[EvalExample]:
     """Validate and deduplicate a list of EvalExample objects.
 
-    Validation rules:
-    - task_input required, non-empty, stripped
-    - expected_behavior required, non-empty, stripped
-    - difficulty in {"easy", "medium", "hard"} — normalized to "medium" if invalid
-    - category required, non-empty — defaults to "general"
-    - No secrets in task_input or expected_behavior
-
-    Deduplication: Duplicate task_input values are dropped (first occurrence wins).
-
-    Args:
-        examples: List of EvalExample objects to validate.
-        min_holdout: Minimum number of examples required for holdout split (unused here,
-            kept for API compatibility with splitting logic).
-
-    Returns:
-        List of validated EvalExample objects.
+    Applies the following rules:
+    - Drops examples with empty/whitespace-only task_input
+    - Drops examples with empty/whitespace-only expected_behavior
+    - Normalizes invalid difficulty to 'medium'
+    - Defaults empty category to 'general'
+    - Drops examples containing secrets in task_input or expected_behavior
+    - Deduplicates by task_input (first occurrence wins)
     """
-    # Late import to avoid circular dependency
-    from evolution.core.external_importers import (
-        _contains_secret,
-        _validate_eval_example,
-        VALID_DIFFICULTIES,
-    )
-
     seen_task_inputs: set[str] = set()
-    validated = []
+    validated: list[EvalExample] = []
     for ex in examples:
-        # Skip duplicates by task_input
-        if ex.task_input in seen_task_inputs:
-            continue
-        # Validate fields
-        result = _validate_eval_example(ex.task_input, ex.expected_behavior, ex.difficulty, ex.category)
+        result = _validate_eval_example(
+            ex.task_input, ex.expected_behavior, ex.difficulty, ex.category
+        )
         if result is None:
             continue
-        # Skip if contains secret
         if _contains_secret(result["task_input"]) or _contains_secret(result["expected_behavior"]):
             continue
+        if result["task_input"] in seen_task_inputs:
+            continue
         seen_task_inputs.add(result["task_input"])
-        validated.append(EvalExample(**result, source=ex.source))
+        validated.append(EvalExample(
+            task_input=result["task_input"],
+            expected_behavior=result["expected_behavior"],
+            difficulty=result["difficulty"],
+            category=result["category"],
+            source=ex.source,
+        ))
     return validated
 
 
@@ -201,11 +250,10 @@ class SyntheticDatasetBuilder:
             if c.get("task_input") and c.get("expected_behavior")
         ]
 
-        # Validate and deduplicate examples
         examples = validate_examples(examples)
 
-        # Shuffle and split (deterministic with seed)
-        random.Random(self.config.seed).shuffle(examples)
+        rng = random.Random(self.config.seed)
+        rng.shuffle(examples)
         n_total = len(examples)
         n_train = max(1, int(n_total * self.config.train_ratio))
         n_val = max(1, int(n_total * self.config.val_ratio))
@@ -218,23 +266,24 @@ class SyntheticDatasetBuilder:
 
 
 class GoldenDatasetLoader:
-    """Load hand-curated evaluation datasets from JSONL files."""
+    """Load hand-curated evaluation datasets from JSONL files.
 
-    def __init__(self, config: Optional[EvolutionConfig] = None):
-        self.config = config or EvolutionConfig()
+    Class-method style (production): GoldenDatasetLoader.load(path)
+    With explicit config: GoldenDatasetLoader.load(path, config)
+    """
 
-    def load(self, path: Path) -> EvalDataset:
-        """Load a golden dataset. If no splits exist, auto-split the single file."""
+    def __init__(self, config: EvolutionConfig | None = None):
+        self.config = config if config is not None else EvolutionConfig()
+
+    def _load(self, path: Path) -> EvalDataset:
+        """Internal load implementation."""
         if (path / "train.jsonl").exists():
-            # Loading pre-split files — still validate but don't re-shuffle
-            dataset = EvalDataset.load(path)
-            # Apply validation to each split
-            dataset.train = validate_examples(dataset.train)
-            dataset.val = validate_examples(dataset.val)
-            dataset.holdout = validate_examples(dataset.holdout)
-            return dataset
+            ds = EvalDataset.load(path)
+            ds.train = validate_examples(ds.train)
+            ds.val = validate_examples(ds.val)
+            ds.holdout = validate_examples(ds.holdout)
+            return ds
 
-        # Single file — auto-split with validation
         golden_file = path if path.suffix == ".jsonl" else path / "golden.jsonl"
         if not golden_file.exists():
             raise FileNotFoundError(f"No golden dataset found at {golden_file}")
@@ -245,11 +294,10 @@ class GoldenDatasetLoader:
                 if line.strip():
                     examples.append(EvalExample.from_dict(json.loads(line)))
 
-        # Validate and deduplicate
         examples = validate_examples(examples)
 
-        # Deterministic shuffle with seed
-        random.Random(self.config.seed).shuffle(examples)
+        rng = random.Random(self.config.seed)
+        rng.shuffle(examples)
         n = len(examples)
         n_train = max(1, int(n * 0.5))
         n_val = max(1, int(n * 0.25))
@@ -259,3 +307,14 @@ class GoldenDatasetLoader:
             val=examples[n_train:n_train + n_val],
             holdout=examples[n_train + n_val:],
         )
+
+    @staticmethod
+    def load(path: Path, config: EvolutionConfig | None = None) -> EvalDataset:
+        """Load a golden dataset.
+
+        Class-method style (production): GoldenDatasetLoader.load(path)
+        or GoldenDatasetLoader.load(path, config) for seeded splitting.
+        """
+        cfg = config if config is not None else EvolutionConfig()
+        loader = GoldenDatasetLoader(cfg)
+        return loader._load(path)
