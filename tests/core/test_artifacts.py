@@ -612,9 +612,6 @@ class TestWriteAll:
                 }
             ]
             writer.write_all(
-                output_dir=Path(tmpdir),
-                skill_name="all-test-skill",
-                timestamp="2025-01-01T00:00:00",
                 baseline_raw="# Baseline",
                 evolved_raw="# Evolved",
                 metrics={"baseline_score": 0.5, "evolved_score": 0.6},
@@ -666,9 +663,6 @@ class TestWriteAll:
             writer = ArtifactWriter(Path(tmpdir))
             config = EvolutionConfig()
             writer.write_all(
-                output_dir=Path(tmpdir),
-                skill_name="content-test",
-                timestamp="2025-01-01",
                 baseline_raw="# Baseline Content",
                 evolved_raw="# Evolved Content",
                 metrics={},

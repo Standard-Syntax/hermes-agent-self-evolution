@@ -20,7 +20,7 @@ from evolution.core.artifacts import ArtifactWriter
 from evolution.core.config import EvolutionConfig
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
-from evolution.core.fitness import run_holdout_evaluation
+from evolution.core.fitness import run_holdout_evaluation, LLMJudge
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.optimizer import compile_skill_module
 from evolution.skills.skill_module import (
@@ -31,6 +31,18 @@ from evolution.skills.skill_module import (
 )
 
 console = Console()
+
+
+def build_constraint_results_table(baseline_constraints, evolved_constraints) -> str:
+    """Build markdown table of constraint results."""
+    lines = []
+    for c in baseline_constraints:
+        status = "PASS" if c.passed else "FAIL"
+        lines.append(f"| {c.constraint_name} (baseline) | {status} |")
+    for c in evolved_constraints:
+        status = "PASS" if c.passed else "FAIL"
+        lines.append(f"| {c.constraint_name} (evolved) | {status} |")
+    return "| Constraint | Status |\n|---|---|\n" + "\n".join(lines)
 
 
 def evolve(
@@ -190,7 +202,7 @@ def evolve(
 
     if not all_pass:
         console.print("[red]✗ Evolved skill FAILED constraints — not deploying[/red]")
-        output_dir = Path("output") / skill_name / "evolved_FAILED"
+        output_dir = Path("output") / skill_name / f"evolved_FAILED_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         failed_constraints_data = {
@@ -199,14 +211,7 @@ def evolve(
             "test_passed": None,
             "benchmark_passed": None,
         }
-        constraint_table_lines = []
-        for c in baseline_constraints:
-            status = "PASS" if c.passed else "FAIL"
-            constraint_table_lines.append(f"| {c.constraint_name} (baseline) | {status} |")
-        for c in evolved_constraints:
-            status = "PASS" if c.passed else "FAIL"
-            constraint_table_lines.append(f"| {c.constraint_name} (evolved) | {status} |")
-        constraint_results_table = "| Constraint | Status |\n|---|---|\n" + "\n".join(constraint_table_lines)
+        constraint_results_table = build_constraint_results_table(baseline_constraints, evolved_constraints)
         failed_metrics = {
             "skill_name": skill_name,
             "timestamp": timestamp,
@@ -219,9 +224,6 @@ def evolve(
         }
         writer = ArtifactWriter(output_dir)
         writer.write_all(
-            output_dir=output_dir,
-            skill_name=skill_name,
-            timestamp=timestamp,
             baseline_raw=skill["raw"],
             evolved_raw=evolved_full,
             metrics=failed_metrics,
@@ -257,6 +259,7 @@ def evolve(
     evolved_scores = []
     all_judge_feedback = []
     holdout_results = []
+    judge = LLMJudge(config)
     for ex in holdout_examples:
         # Score baseline and evolved using LLM judge
         with dspy.context(lm=lm):
@@ -273,6 +276,7 @@ def evolve(
                 expected_behavior=ex.expected_behavior,
                 skill_text=optimized_module.skill_text,
                 config=config,
+                judge=judge,
             )
 
             baseline_scores.append(result["baseline_score"])
@@ -285,38 +289,56 @@ def evolve(
     improvement = avg_evolved - avg_baseline
 
     # ── 9. Improvement threshold gate ────────────────────────────────────
-    IMPROVEMENT_THRESHOLD = 0.10
     run_status = "passed"
     failed_gate = None
 
-    if improvement < IMPROVEMENT_THRESHOLD:
-        console.print(f"[red]✗ Improvement {improvement:.3f} below threshold {IMPROVEMENT_THRESHOLD:.1%}[/red]")
+    if improvement < (config.improvement_threshold - 1e-9):
+        console.print(f"[red]✗ Improvement {improvement:.3f} below threshold {config.improvement_threshold:.1%}[/red]")
         run_status = "failed"
         failed_gate = "improvement_threshold"
-        output_dir = Path("output") / skill_name / "evolved_FAILED"
+        output_dir = Path("output") / skill_name / f"evolved_FAILED_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        failed_early_all_judge_feedback = all_judge_feedback
         early_constraints_data = {
             "baseline_results": baseline_constraints,
             "evolved_results": evolved_constraints,
             "test_passed": None,
             "benchmark_passed": None,
         }
+        constraint_results_table = build_constraint_results_table(baseline_constraints, evolved_constraints)
         metrics = {
             "skill_name": skill_name,
             "timestamp": timestamp,
+            "iterations": iterations,
+            "optimizer": "GEPA",
+            "optimizer_fallback_used": optimizer_fallback_used,
+            "optimizer_model": optimizer_model,
+            "eval_model": eval_model,
+            "max_metric_calls": config.max_metric_calls,
             "status": run_status,
             "failed_gate": failed_gate,
             "deployable": False,
             "baseline_score": avg_baseline,
             "evolved_score": avg_evolved,
             "improvement": improvement,
+            "baseline_size": len(skill["body"]),
+            "evolved_size": len(evolved_body),
+            "train_examples": len(dataset.train),
+            "val_examples": len(dataset.val),
+            "holdout_examples": len(dataset.holdout),
+            "elapsed_seconds": elapsed,
+            "constraints_passed": all_pass,
         }
+        (output_dir / "judge_feedback.md").write_text(
+            "# Holdout Evaluation Judge Feedback\n\n"
+            + "\n\n---\n\n".join(
+                f"## Example {i+1}\n\n{fb}"
+                for i, fb in enumerate(failed_early_all_judge_feedback)
+            )
+        )
         writer = ArtifactWriter(output_dir)
         writer.write_all(
-            output_dir=output_dir,
-            skill_name=skill_name,
-            timestamp=timestamp,
             baseline_raw=skill["raw"],
             evolved_raw=evolved_full,
             metrics=metrics,
@@ -333,7 +355,7 @@ def evolve(
                 "evolved_score": avg_evolved,
                 "improvement": improvement,
                 "improvement_pct": (improvement / max(0.001, avg_baseline)) * 100,
-                "constraint_results_table": "",
+                "constraint_results_table": constraint_results_table,
                 "test_passed": None,
                 "test_message": "Skipped",
                 "benchmark_passed": None,
@@ -346,6 +368,7 @@ def evolve(
     test_result = None
     if run_tests:
         console.print("\n[bold]Running test suite gate[/bold]")
+        skill_path.write_text(evolved_full)
         test_result = validator.run_test_suite(resolved_hermes_path)
         icon = "✓" if test_result.passed else "✗"
         color = "green" if test_result.passed else "red"
@@ -394,7 +417,7 @@ def evolve(
     # ── 12. Save output ─────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if failed_gate:
-        output_dir = Path("output") / skill_name / "evolved_FAILED"
+        output_dir = Path("output") / skill_name / f"evolved_FAILED_{timestamp}"
     else:
         output_dir = Path("output") / skill_name / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -430,14 +453,7 @@ def evolve(
         "benchmark_passed": benchmark_result.passed if benchmark_result else None,
     }
 
-    constraint_table_lines = []
-    for c in baseline_constraints:
-        status = "PASS" if c.passed else "FAIL"
-        constraint_table_lines.append(f"| {c.constraint_name} (baseline) | {status} |")
-    for c in evolved_constraints:
-        status = "PASS" if c.passed else "FAIL"
-        constraint_table_lines.append(f"| {c.constraint_name} (evolved) | {status} |")
-    constraint_results_table = "| Constraint | Status |\n|---|---|\n" + "\n".join(constraint_table_lines)
+    constraint_results_table = build_constraint_results_table(baseline_constraints, evolved_constraints)
 
     pr_summary_data = {
         "skill_name": skill_name,
@@ -458,9 +474,6 @@ def evolve(
 
     writer = ArtifactWriter(output_dir)
     writer.write_all(
-        output_dir=output_dir,
-        skill_name=skill_name,
-        timestamp=timestamp,
         baseline_raw=skill["raw"],
         evolved_raw=evolved_full,
         metrics=metrics,
