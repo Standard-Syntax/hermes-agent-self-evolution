@@ -157,6 +157,7 @@ def validate_examples(examples: list[EvalExample]) -> list[EvalExample]:
     - Drops examples containing secrets in task_input or expected_behavior
     - Deduplicates by task_input (first occurrence wins)
     """
+    seen_task_inputs: set[str] = set()
     validated: list[EvalExample] = []
     for ex in examples:
         result = _validate_eval_example(
@@ -166,8 +167,9 @@ def validate_examples(examples: list[EvalExample]) -> list[EvalExample]:
             continue
         if _contains_secret(result["task_input"]) or _contains_secret(result["expected_behavior"]):
             continue
-        if result["task_input"] in {v.task_input for v in validated}:
+        if result["task_input"] in seen_task_inputs:
             continue
+        seen_task_inputs.add(result["task_input"])
         validated.append(EvalExample(
             task_input=result["task_input"],
             expected_behavior=result["expected_behavior"],
