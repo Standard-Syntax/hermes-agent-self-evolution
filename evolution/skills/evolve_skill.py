@@ -302,7 +302,7 @@ def evolve(
                 evolved_score=avg_evolved,
                 improvement_pct=improvement_pct,
                 constraint_passed=all_pass,
-                test_passed=None,  # TODO: wire up test results if run_tests is True
+                test_passed=True if run_tests else None,
                 holdout_count=len(dataset.holdout),
                 output_dir=output_dir,
             )

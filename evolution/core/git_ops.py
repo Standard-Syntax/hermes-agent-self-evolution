@@ -155,7 +155,7 @@ def apply_to_branch(
             check=True,
         )
         subprocess.run(
-            ["git", "commit", "-m", f"Evolve skill: {skill_name}"],
+            ["git", "commit", "-m", f"Evolve skill: {skill_name}", "--allow-empty"],
             cwd=hermes_path,
             capture_output=True,
             text=True,
@@ -171,6 +171,11 @@ def apply_to_branch(
         )
         commit_sha = sha_result.stdout.strip()
     except subprocess.CalledProcessError as e:
+        subprocess.run(
+            ["git", "checkout", "-"],
+            cwd=hermes_path,
+            capture_output=True,
+        )
         return BranchResult(
             success=False,
             branch_name=branch_name,
