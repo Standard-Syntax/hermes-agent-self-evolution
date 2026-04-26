@@ -8,6 +8,7 @@ C) Golden sets — hand-curated JSONL files
 
 import json
 import random
+import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
@@ -15,6 +16,65 @@ from typing import Optional
 import dspy
 
 from evolution.core.config import EvolutionConfig
+
+
+SECRET_PATTERNS = re.compile(
+    r'('
+    r'sk-ant-api\S+'
+    r'|sk-or-v1-\S+'
+    r'|sk-\S{20,}'
+    r'|ghp_\S+'
+    r'|ghu_\S+'
+    r'|xoxb-\S+'
+    r'|xapp-\S+'
+    r'|ntn_\S+'
+    r'|AKIA[0-9A-Z]{16}'
+    r'|Bearer\s+\S{20,}'
+    r'|-----BEGIN\s+(RSA\s+)?PRIVATE\sKEY-----'
+    r'|ANTHROPIC_API_KEY'
+    r'|OPENAI_API_KEY'
+    r'|OPENROUTER_API_KEY'
+    r'|SLACK_BOT_TOKEN'
+    r'|GITHUB_TOKEN'
+    r'|AWS_SECRET_ACCESS_KEY'
+    r'|DATABASE_URL'
+    r'|\bpassword\s*[=:]\s*\S+'
+    r'|\bsecret\s*[=:]\s*\S+'
+    r'|\btoken\s*[=:]\s*\S{10,}'
+    r')',
+    re.IGNORECASE,
+)
+
+VALID_DIFFICULTIES = {"easy", "medium", "hard"}
+
+
+def _contains_secret(text: str) -> bool:
+    return bool(SECRET_PATTERNS.search(text))
+
+
+def _validate_eval_example(
+    task_input: str,
+    expected_behavior: str,
+    difficulty: str,
+    category: str,
+) -> Optional[dict]:
+    if not task_input or not task_input.strip():
+        return None
+    if not expected_behavior or not expected_behavior.strip():
+        return None
+    difficulty = difficulty.strip().lower() if difficulty else "medium"
+    if difficulty not in VALID_DIFFICULTIES:
+        difficulty = "medium"
+    category = category.strip() if category else "general"
+    if not category:
+        category = "general"
+    task_input = task_input.strip()[:2000]
+    return {
+        "task_input": task_input,
+        "expected_behavior": expected_behavior.strip(),
+        "difficulty": difficulty,
+        "category": category,
+    }
 
 
 @dataclass
@@ -84,6 +144,40 @@ class EvalDataset:
             ).with_inputs("task_input")
             for ex in data
         ]
+
+
+def validate_examples(examples: list[EvalExample]) -> list[EvalExample]:
+    """Validate and deduplicate a list of EvalExample objects.
+
+    Applies the following rules:
+    - Drops examples with empty/whitespace-only task_input
+    - Drops examples with empty/whitespace-only expected_behavior
+    - Normalizes invalid difficulty to 'medium'
+    - Defaults empty category to 'general'
+    - Drops examples containing secrets in task_input or expected_behavior
+    - Deduplicates by task_input (first occurrence wins)
+    """
+    seen_task_inputs: set[str] = set()
+    validated: list[EvalExample] = []
+    for ex in examples:
+        result = _validate_eval_example(
+            ex.task_input, ex.expected_behavior, ex.difficulty, ex.category
+        )
+        if result is None:
+            continue
+        if _contains_secret(result["task_input"]) or _contains_secret(result["expected_behavior"]):
+            continue
+        if result["task_input"] in seen_task_inputs:
+            continue
+        seen_task_inputs.add(result["task_input"])
+        validated.append(EvalExample(
+            task_input=result["task_input"],
+            expected_behavior=result["expected_behavior"],
+            difficulty=result["difficulty"],
+            category=result["category"],
+            source=ex.source,
+        ))
+    return validated
 
 
 class SyntheticDatasetBuilder:
@@ -156,8 +250,10 @@ class SyntheticDatasetBuilder:
             if c.get("task_input") and c.get("expected_behavior")
         ]
 
-        # Shuffle and split
-        random.shuffle(examples)
+        examples = validate_examples(examples)
+
+        rng = random.Random(self.config.seed)
+        rng.shuffle(examples)
         n_total = len(examples)
         n_train = max(1, int(n_total * self.config.train_ratio))
         n_val = max(1, int(n_total * self.config.val_ratio))
@@ -170,15 +266,24 @@ class SyntheticDatasetBuilder:
 
 
 class GoldenDatasetLoader:
-    """Load hand-curated evaluation datasets from JSONL files."""
+    """Load hand-curated evaluation datasets from JSONL files.
 
-    @staticmethod
-    def load(path: Path) -> EvalDataset:
-        """Load a golden dataset. If no splits exist, auto-split the single file."""
+    Class-method style (production): GoldenDatasetLoader.load(path)
+    With explicit config: GoldenDatasetLoader.load(path, config)
+    """
+
+    def __init__(self, config: EvolutionConfig | None = None):
+        self.config = config if config is not None else EvolutionConfig()
+
+    def _load(self, path: Path) -> EvalDataset:
+        """Internal load implementation."""
         if (path / "train.jsonl").exists():
-            return EvalDataset.load(path)
+            ds = EvalDataset.load(path)
+            ds.train = validate_examples(ds.train)
+            ds.val = validate_examples(ds.val)
+            ds.holdout = validate_examples(ds.holdout)
+            return ds
 
-        # Single file — auto-split
         golden_file = path if path.suffix == ".jsonl" else path / "golden.jsonl"
         if not golden_file.exists():
             raise FileNotFoundError(f"No golden dataset found at {golden_file}")
@@ -189,7 +294,10 @@ class GoldenDatasetLoader:
                 if line.strip():
                     examples.append(EvalExample.from_dict(json.loads(line)))
 
-        random.shuffle(examples)
+        examples = validate_examples(examples)
+
+        rng = random.Random(self.config.seed)
+        rng.shuffle(examples)
         n = len(examples)
         n_train = max(1, int(n * 0.5))
         n_val = max(1, int(n * 0.25))
@@ -199,3 +307,14 @@ class GoldenDatasetLoader:
             val=examples[n_train:n_train + n_val],
             holdout=examples[n_train + n_val:],
         )
+
+    @staticmethod
+    def load(path: Path, config: EvolutionConfig | None = None) -> EvalDataset:
+        """Load a golden dataset.
+
+        Class-method style (production): GoldenDatasetLoader.load(path)
+        or GoldenDatasetLoader.load(path, config) for seeded splitting.
+        """
+        cfg = config if config is not None else EvolutionConfig()
+        loader = GoldenDatasetLoader(cfg)
+        return loader._load(path)
