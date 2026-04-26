@@ -36,6 +36,9 @@ class EvolutionConfig:
     val_ratio: float = 0.25
     holdout_ratio: float = 0.25
 
+    # Random seed for deterministic shuffling and splitting
+    seed: int = 42
+
     # Benchmark gating
     run_pytest: bool = True
     run_tblite: bool = False  # Expensive — opt-in
