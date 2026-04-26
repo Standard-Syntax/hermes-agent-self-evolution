@@ -1,66 +1,91 @@
-# Task P1-007 — Fix test infrastructure and TBLite gate
+# Task
 
-## Two issues to resolve
+**Slice P1-009 — Add optional apply-to-Hermes branch workflow**
 
-### Issue 1: Test infrastructure — mock scores yield <10% improvement
+## Description
 
-**Problem:** Tests `test_run_tests_gate_is_called` and `test_failed_test_gate_produces_correct_json` mock `run_holdout_evaluation` with:
-```python
-return_value={
-    "baseline_score": 0.8,
-    "evolved_score": 0.85,  # Only 5% improvement!
-    "judge_feedback": "Mock feedback",
-}
-```
+Add `--apply-to-branch` flag to the evolve_skill CLI that creates a local review branch in the Hermes agent repo with the evolved skill. This is NOT a full PR workflow — it creates a branch and commits the evolved SKILL.md, requiring human review before any merge.
 
-This triggers the improvement threshold gate (≥10% required) and causes early return — the test gate code is never reached.
+## Changes
 
-**Fix needed:** Change to `baseline_score: 0.8, evolved_score: 0.9` (12.5% improvement) for tests that verify the test gate behavior.
-
-### Issue 2: TBLite benchmark gate — TODO placeholder
-
-**Problem:** Critic says benchmark gate is "only scaffolding" — a TODO placeholder.
-
-**Analysis:** The task description says "12. optionally run benchmark gate" and `run_tblite: bool = False` by default. This is explicitly **optional**. The scaffolding is correct. Full TBLite integration requires a separate `run_tblite_benchmark()` function to be implemented — not in scope for P1-007.
-
-**Resolution:** Add a comment documenting that the placeholder is intentional for optional TBLite integration.
+1. **Create `evolution/core/git_ops.py`** — Git operations adapter for branch creation, file replacement, and commit
+2. **Modify `evolution/skills/evolve_skill.py`** — Add `--apply-to-branch` flag and wire it into the evolution flow
+3. **Create `tests/core/test_git_ops.py`** — Test the git_ops module
 
 ## Acceptance criteria
 
-- [ ] `test_run_tests_gate_is_called` uses mock scores with ≥10% improvement (baseline 0.8, evolved 0.9)
-- [ ] `test_failed_test_gate_produces_correct_json` uses mock scores with ≥10% improvement
-- [ ] `test_improvement_threshold_gate` correctly uses small improvement (5%) — no change needed
-- [ ] TBLite benchmark gate has a comment explaining it's intentionally optional
+- [ ] `--apply-to-branch` flag is added to the CLI
+- [ ] `apply_to_branch(skill_name, evolved_skill_text, hermes_path, output_dir)` creates:
+  - Branch named `evolution/<skill>/<timestamp>`
+  - Replaces the target `skills/<skill_name>/SKILL.md` with evolved version
+  - Commits the change
+  - Writes PR body to `output_dir/pr_body.md`
+- [ ] If `--apply-to-branch` is not provided, no branch is created (no-op)
+- [ ] The branch workflow does NOT auto-open or auto-merge a PR
+- [ ] Tests pass
 
 ## Files to modify
 
-- `tests/skills/test_evolve_skill.py` (fix mock scores in TestGateEnforcement)
+- `evolution/core/git_ops.py` (create new)
+- `evolution/skills/evolve_skill.py` (add `--apply-to-branch` flag and call)
+- `tests/core/test_git_ops.py` (create new)
 
 ## Code context
 
-**Current mock in test_run_tests_gate_is_called (line 658-664):**
+The evolve_skill.py already has all the pieces: it loads the skill, optimizes it, validates constraints, runs holdout evaluation, and writes output files. We just need to add the optional branch creation step at the end (step 13 in the pipeline).
+
+Key integration point: after `writer.write_all(...)` in evolve_skill.py around line 460, if `apply_to_branch` is True, call `git_ops.apply_to_branch(...)`.
+
+## API Design for git_ops.py
+
 ```python
-with mock.patch(
-    "evolution.skills.evolve_skill.run_holdout_evaluation",
-    return_value={
-        "baseline_score": 0.8,
-        "evolved_score": 0.85,  # ← Only 5% improvement!
-        "judge_feedback": "Mock feedback",
-    },
-):
+@dataclass
+class BranchResult:
+    success: bool
+    branch_name: str
+    commit_sha: str
+    pr_body_path: Path | None
+    error: str | None
+
+def apply_to_branch(
+    skill_name: str,
+    evolved_skill_text: str,
+    hermes_path: Path,
+    output_dir: Path,
+    timestamp: str,
+) -> BranchResult:
+    """Create a review branch in hermes_agent_path with evolved skill."""
+    ...
+
+def build_pr_body(
+    skill_name: str,
+    baseline_score: float,
+    evolved_score: float,
+    improvement_pct: float,
+    constraint_passed: bool,
+    test_passed: bool | None,
+    holdout_count: int,
+    output_dir: Path,
+) -> Path:
+    """Write PR body markdown to output_dir/pr_body.md and return the path."""
+    ...
 ```
 
-**Fix:** Change to `evolved_score: 0.9` for ≥10% improvement.
+## Loop Summary
 
-**Current TBLite placeholder (evolve_skill.py lines 296-304):**
-```python
-# ── 12. Benchmark gate (optional TBLite) ─────────────────────────
-benchmark_result = None
-if config.run_tblite:
-    console.print("\n[bold]Running TBLite benchmark gate[/bold]")
-    # TODO: Implement TBLite benchmark check
-    # benchmark_result = run_tblite_benchmark(...)
-    # if benchmark_regression > config.tblite_regression_threshold:
-    #     run_status = "failed"
-    #     failed_gate = "benchmark"
-```
+### Critic feedback — iteration 1
+- [BLOCK] CLI parameter name mismatch: `--apply-to-branch` derives variable `apply_to_branch`, but main() expected `should_apply_to_branch`. Fixed.
+- [HIGH] `apply_to_branch()` had 5th mandatory `timestamp` argument not in spec. Made it optional with default.
+- [HIGH] File was written before branch creation — if branch creation failed, repo was left corrupted. Fixed by creating branch first, then writing file.
+- [MEDIUM] `commit_sha` was parsed incorrectly from git commit stdout. Fixed by using `git rev-parse HEAD` after commit.
+- [MEDIUM] Path traversal vulnerability in skill_name. Fixed by resolving path and validating prefix.
+
+### Final verdict: ACCEPTABLE
+
+### Files changed
+- `evolution/core/git_ops.py` (created)
+- `evolution/skills/evolve_skill.py` (modified)
+- `tests/core/test_git_ops.py` (created)
+
+### Test results
+11 passed in 0.16s

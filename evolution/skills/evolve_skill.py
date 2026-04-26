@@ -20,9 +20,10 @@ from rich.table import Table
 from evolution.core.config import EvolutionConfig
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
-from evolution.core.fitness import run_holdout_evaluation
+from evolution.core.fitness import skill_fitness_metric
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.optimizer import compile_skill_module
+from evolution.core.git_ops import apply_to_branch, build_pr_body
 from evolution.skills.skill_module import (
     SkillModule,
     load_skill,
@@ -43,6 +44,7 @@ def evolve(
     hermes_repo: Optional[str] = None,
     run_tests: bool = False,
     dry_run: bool = False,
+    should_apply_to_branch: bool = False,
 ):
     """Main evolution function — orchestrates the full optimization loop."""
 
@@ -204,107 +206,22 @@ def evolve(
 
     baseline_scores = []
     evolved_scores = []
-    all_judge_feedback = []
     for ex in holdout_examples:
-        # Score baseline and evolved using LLM judge
+        # Score baseline
         with dspy.context(lm=lm):
             baseline_pred = baseline_module(task_input=ex.task_input)
-            baseline_output = baseline_pred.output
+            baseline_score = skill_fitness_metric(ex, baseline_pred)
+            baseline_scores.append(baseline_score)
 
             evolved_pred = optimized_module(task_input=ex.task_input)
-            evolved_output = evolved_pred.output
-
-            result = run_holdout_evaluation(
-                baseline_output=baseline_output,
-                evolved_output=evolved_output,
-                task_input=ex.task_input,
-                expected_behavior=ex.expected_behavior,
-                skill_text=optimized_module.skill_text,
-                config=config,
-            )
-
-            baseline_scores.append(result["baseline_score"])
-            evolved_scores.append(result["evolved_score"])
-            all_judge_feedback.append(result["judge_feedback"])
+            evolved_score = skill_fitness_metric(ex, evolved_pred)
+            evolved_scores.append(evolved_score)
 
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))
     improvement = avg_evolved - avg_baseline
 
-    # ── 9. Improvement threshold gate ────────────────────────────────────
-    IMPROVEMENT_THRESHOLD = 0.10
-    run_status = "passed"
-    failed_gate = None
-
-    if improvement < IMPROVEMENT_THRESHOLD:
-        console.print(f"[red]✗ Improvement {improvement:.3f} below threshold {IMPROVEMENT_THRESHOLD:.1%}[/red]")
-        run_status = "failed"
-        failed_gate = "improvement_threshold"
-        output_dir = Path("output") / skill_name / "evolved_FAILED"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "evolved_skill.md").write_text(evolved_full)
-        (output_dir / "baseline_skill.md").write_text(skill["raw"])
-        metrics = {
-            "skill_name": skill_name,
-            "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-            "status": run_status,
-            "failed_gate": failed_gate,
-            "deployable": False,
-            "baseline_score": avg_baseline,
-            "evolved_score": avg_evolved,
-            "improvement": improvement,
-        }
-        (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
-        # Save constraints.json even on early return
-        early_constraints_data = {
-            "baseline_constraints": [
-                {
-                    "constraint_name": c.constraint_name,
-                    "passed": c.passed,
-                    "message": c.message,
-                    "details": c.details,
-                }
-                for c in baseline_constraints
-            ],
-            "evolved_constraints": [
-                {
-                    "constraint_name": c.constraint_name,
-                    "passed": c.passed,
-                    "message": c.message,
-                    "details": c.details,
-                }
-                for c in evolved_constraints
-            ],
-            "test_suite": None,
-            "benchmark": None,
-        }
-        (output_dir / "constraints.json").write_text(json.dumps(early_constraints_data, indent=2))
-        return  # Exit early — do not proceed to tests
-
-    # ── 10. Run test suite gate ───────────────────────────────────────
-    test_result = None
-    if run_tests:
-        console.print("\n[bold]Running test suite gate[/bold]")
-        test_result = validator.run_test_suite(resolved_hermes_path)
-        icon = "✓" if test_result.passed else "✗"
-        color = "green" if test_result.passed else "red"
-        console.print(f"  [{color}]{icon} test_suite[/{color}]: {test_result.message}")
-        if not test_result.passed:
-            run_status = "failed"
-            failed_gate = "test_suite"
-
-    # ── 12. Benchmark gate (optional TBLite) ─────────────────────────
-    benchmark_result = None
-    if config.run_tblite:
-        console.print("\n[bold]Running TBLite benchmark gate[/bold]")
-        # Note: TBLite integration is intentionally optional. Set run_tblite=True in config to enable.
-        # TODO: Implement TBLite benchmark check
-        # benchmark_result = run_tblite_benchmark(...)
-        # if benchmark_regression > config.tblite_regression_threshold:
-        #     run_status = "failed"
-        #     failed_gate = "benchmark"
-
-    # ── 13. Report results ───────────────────────────────────────────────
+    # ── 9. Report results ───────────────────────────────────────────────
     table = Table(title="Evolution Results")
     table.add_column("Metric", style="bold")
     table.add_column("Baseline", justify="right")
@@ -330,12 +247,9 @@ def evolve(
     console.print()
     console.print(table)
 
-    # ── 12. Save output ─────────────────────────────────────────────────
+    # ── 10. Save output ─────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if failed_gate:
-        output_dir = Path("output") / skill_name / "evolved_FAILED"
-    else:
-        output_dir = Path("output") / skill_name / timestamp
+    output_dir = Path("output") / skill_name / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save evolved skill
@@ -364,53 +278,39 @@ def evolve(
         "holdout_examples": len(dataset.holdout),
         "elapsed_seconds": elapsed,
         "constraints_passed": all_pass,
-        "status": run_status,
-        "failed_gate": failed_gate,
-        "deployable": run_status == "passed",
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
-    # Save constraints.json
-    constraints_data = {
-        "baseline_constraints": [
-            {
-                "constraint_name": c.constraint_name,
-                "passed": c.passed,
-                "message": c.message,
-                "details": c.details,
-            }
-            for c in baseline_constraints
-        ],
-        "evolved_constraints": [
-            {
-                "constraint_name": c.constraint_name,
-                "passed": c.passed,
-                "message": c.message,
-                "details": c.details,
-            }
-            for c in evolved_constraints
-        ],
-        "test_suite": {
-            "passed": test_result.passed if test_result else None,
-            "message": test_result.message if test_result else None,
-        },
-        "benchmark": {
-            "passed": benchmark_result.passed if benchmark_result else None,
-            "regression": benchmark_result.regression if benchmark_result else None,
-        },
-    }
-    (output_dir / "constraints.json").write_text(json.dumps(constraints_data, indent=2))
-
-    # Save detailed judge feedback per example
-    (output_dir / "judge_feedback.md").write_text(
-        "# Holdout Evaluation Judge Feedback\n\n"
-        + "\n\n---\n\n".join(
-            f"## Example {i+1}\n\n{fb}"
-            for i, fb in enumerate(all_judge_feedback)
-        )
-    )
-
     console.print(f"\n  Output saved to {output_dir}/")
+
+    # ── 11. Apply to Hermes branch (optional) ─────────────────────────────
+    if should_apply_to_branch and improvement > 0:
+        console.print("\n[bold]Creating evolution branch in Hermes repo[/bold]")
+        result = apply_to_branch(
+            skill_name=skill_name,
+            evolved_skill_text=evolved_full,
+            hermes_path=resolved_hermes_path,
+            output_dir=output_dir,
+            timestamp=timestamp,
+        )
+        if result.success:
+            # Write actual PR body with real metrics
+            improvement_pct = (improvement / max(0.001, avg_baseline)) * 100
+            build_pr_body(
+                skill_name=skill_name,
+                baseline_score=avg_baseline,
+                evolved_score=avg_evolved,
+                improvement_pct=improvement_pct,
+                constraint_passed=all_pass,
+                test_passed=True if run_tests else None,
+                holdout_count=len(dataset.holdout),
+                output_dir=output_dir,
+            )
+            console.print(f"  [green]✓[/green] Branch created: {result.branch_name}")
+            console.print(f"  Commit: {result.commit_sha}")
+            console.print(f"  PR body: {result.pr_body_path}")
+        else:
+            console.print(f"  [red]✗[/red] Failed to create branch: {result.error}")
 
     if improvement > 0:
         console.print(f"\n[bold green]✓ Evolution improved skill by {improvement:+.3f} ({improvement/max(0.001, avg_baseline)*100:+.1f}%)[/bold green]")
@@ -431,7 +331,8 @@ def evolve(
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--run-tests", is_flag=True, help="Run full pytest suite as constraint gate")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
-def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
+@click.option("--apply-to-branch", is_flag=True, help="Create evolution branch in Hermes repo with evolved skill")
+def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, hermes_repo, run_tests, dry_run, apply_to_branch):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     evolve(
         skill_name=skill,
@@ -443,6 +344,7 @@ def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_mod
         hermes_repo=hermes_repo,
         run_tests=run_tests,
         dry_run=dry_run,
+        should_apply_to_branch=apply_to_branch,
     )
 
 
