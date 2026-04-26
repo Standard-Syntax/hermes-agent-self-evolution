@@ -47,7 +47,7 @@ class ArtifactWriter:
             if isinstance(value, list):
                 result[key] = [self._serialize_constraint_item(item) for item in value]
             else:
-                result[key] = value
+                result[key] = self._serialize_constraint_item(value)
         return result
 
     def _serialize_constraint_item(self, item) -> dict:
@@ -71,11 +71,9 @@ class ArtifactWriter:
 
     def write_run_config(self, config: EvolutionConfig) -> None:
         """Write run_config.json with resolved config values."""
-        # Use __dict__ to serialize public fields (exclude private/methods)
         config_dict = {
             k: v for k, v in config.__dict__.items() if not k.startswith("_")
         }
-        # Path objects need to be converted to strings for JSON serialization
         for k, v in config_dict.items():
             if isinstance(v, Path):
                 config_dict[k] = str(v)
@@ -136,9 +134,6 @@ class ArtifactWriter:
     def write_all(
         self,
         *,
-        output_dir,
-        skill_name,
-        timestamp,
         baseline_raw,
         evolved_raw,
         metrics,
@@ -147,20 +142,14 @@ class ArtifactWriter:
         config,
         pr_summary_data,
     ) -> None:
-        """Write all artifact files. output_dir argument overrides self.output_dir."""
-        original_output_dir = self.output_dir
-        try:
-            if output_dir is not None:
-                self.output_dir = Path(output_dir)
-            self.output_dir.mkdir(parents=True, exist_ok=True)
+        """Write all artifact files to the directory provided at construction."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-            self.write_baseline(baseline_raw)
-            self.write_evolved(evolved_raw)
-            self.write_diff(baseline_raw, evolved_raw)
-            self.write_metrics(metrics)
-            self.write_constraints(constraints_data)
-            self.write_holdout_results(holdout_results)
-            self.write_run_config(config)
-            self.write_pr_summary(pr_summary_data)
-        finally:
-            self.output_dir = original_output_dir
+        self.write_baseline(baseline_raw)
+        self.write_evolved(evolved_raw)
+        self.write_diff(baseline_raw, evolved_raw)
+        self.write_metrics(metrics)
+        self.write_constraints(constraints_data)
+        self.write_holdout_results(holdout_results)
+        self.write_run_config(config)
+        self.write_pr_summary(pr_summary_data)

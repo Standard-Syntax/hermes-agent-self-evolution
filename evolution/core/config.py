@@ -31,7 +31,6 @@ class EvolutionConfig:
     max_prompt_growth: float = 0.2  # 20% max growth over baseline
 
     # Eval dataset
-    seed: int = 42  # Random seed for deterministic splitting
     eval_dataset_size: int = 20  # Total examples to generate
     train_ratio: float = 0.5
     val_ratio: float = 0.25
@@ -39,6 +38,9 @@ class EvolutionConfig:
 
     # Random seed for deterministic shuffling and splitting
     seed: int = 42
+
+    # Improvement threshold for evolution success
+    improvement_threshold: float = 0.10
 
     # Benchmark gating
     run_pytest: bool = True
