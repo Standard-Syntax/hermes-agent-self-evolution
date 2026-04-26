@@ -4,6 +4,8 @@ Uses LLM-as-judge with rubrics to score agent outputs.
 Supports length penalties and multi-dimensional scoring.
 """
 
+import re
+
 import dspy
 from dataclasses import dataclass
 
@@ -118,9 +120,9 @@ def fast_metric(example: dspy.Example, prediction: dspy.Prediction, trace=None) 
 
     score = 0.5  # Base score for non-empty output
 
-    # Simple keyword overlap as a fast proxy
-    expected_words = set(expected.lower().split())
-    output_words = set(agent_output.lower().split())
+    # Simple keyword overlap as a fast proxy (using regex to handle punctuation)
+    expected_words = set(re.findall(r'\w+', expected.lower()))
+    output_words = set(re.findall(r'\w+', agent_output.lower()))
     if expected_words:
         overlap = len(expected_words & output_words) / len(expected_words)
         score = 0.3 + (0.7 * overlap)
@@ -227,6 +229,7 @@ def run_holdout_evaluation(
     expected_behavior: str,
     skill_text: str,
     config: EvolutionConfig,
+    judge: LLMJudge | None = None,
 ) -> dict[str, str | float]:
     """Run holdout evaluation comparing baseline and evolved outputs.
 
@@ -239,12 +242,13 @@ def run_holdout_evaluation(
         expected_behavior: The expected behavior rubric
         skill_text: The skill/instructions the agent was following
         config: EvolutionConfig for LLM judge setup
+        judge: Optional pre-instantiated LLMJudge for better performance
 
     Returns:
         Dict with task_input, baseline_output, evolved_output, baseline_score,
         evolved_score, and judge_feedback fields
     """
-    judge = LLMJudge(config)
+    judge = judge or LLMJudge(config)
 
     baseline_fitness = judge.score(
         task_input=task_input,
