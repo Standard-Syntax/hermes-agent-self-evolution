@@ -86,6 +86,51 @@ class EvalDataset:
         ]
 
 
+def validate_examples(examples: list[EvalExample], min_holdout: int = 1) -> list[EvalExample]:
+    """Validate and deduplicate a list of EvalExample objects.
+
+    Validation rules:
+    - task_input required, non-empty, stripped
+    - expected_behavior required, non-empty, stripped
+    - difficulty in {"easy", "medium", "hard"} — normalized to "medium" if invalid
+    - category required, non-empty — defaults to "general"
+    - No secrets in task_input or expected_behavior
+
+    Deduplication: Duplicate task_input values are dropped (first occurrence wins).
+
+    Args:
+        examples: List of EvalExample objects to validate.
+        min_holdout: Minimum number of examples required for holdout split (unused here,
+            kept for API compatibility with splitting logic).
+
+    Returns:
+        List of validated EvalExample objects.
+    """
+    # Late import to avoid circular dependency
+    from evolution.core.external_importers import (
+        _contains_secret,
+        _validate_eval_example,
+        VALID_DIFFICULTIES,
+    )
+
+    seen_task_inputs: set[str] = set()
+    validated = []
+    for ex in examples:
+        # Skip duplicates by task_input
+        if ex.task_input in seen_task_inputs:
+            continue
+        # Validate fields
+        result = _validate_eval_example(ex.task_input, ex.expected_behavior, ex.difficulty, ex.category)
+        if result is None:
+            continue
+        # Skip if contains secret
+        if _contains_secret(result["task_input"]) or _contains_secret(result["expected_behavior"]):
+            continue
+        seen_task_inputs.add(result["task_input"])
+        validated.append(EvalExample(**result, source=ex.source))
+    return validated
+
+
 class SyntheticDatasetBuilder:
     """Generate evaluation datasets using a strong LLM.
 
@@ -156,8 +201,11 @@ class SyntheticDatasetBuilder:
             if c.get("task_input") and c.get("expected_behavior")
         ]
 
-        # Shuffle and split
-        random.shuffle(examples)
+        # Validate and deduplicate examples
+        examples = validate_examples(examples)
+
+        # Shuffle and split (deterministic with seed)
+        random.Random(self.config.seed).shuffle(examples)
         n_total = len(examples)
         n_train = max(1, int(n_total * self.config.train_ratio))
         n_val = max(1, int(n_total * self.config.val_ratio))
@@ -172,13 +220,21 @@ class SyntheticDatasetBuilder:
 class GoldenDatasetLoader:
     """Load hand-curated evaluation datasets from JSONL files."""
 
-    @staticmethod
-    def load(path: Path) -> EvalDataset:
+    def __init__(self, config: Optional[EvolutionConfig] = None):
+        self.config = config or EvolutionConfig()
+
+    def load(self, path: Path) -> EvalDataset:
         """Load a golden dataset. If no splits exist, auto-split the single file."""
         if (path / "train.jsonl").exists():
-            return EvalDataset.load(path)
+            # Loading pre-split files — still validate but don't re-shuffle
+            dataset = EvalDataset.load(path)
+            # Apply validation to each split
+            dataset.train = validate_examples(dataset.train)
+            dataset.val = validate_examples(dataset.val)
+            dataset.holdout = validate_examples(dataset.holdout)
+            return dataset
 
-        # Single file — auto-split
+        # Single file — auto-split with validation
         golden_file = path if path.suffix == ".jsonl" else path / "golden.jsonl"
         if not golden_file.exists():
             raise FileNotFoundError(f"No golden dataset found at {golden_file}")
@@ -189,7 +245,11 @@ class GoldenDatasetLoader:
                 if line.strip():
                     examples.append(EvalExample.from_dict(json.loads(line)))
 
-        random.shuffle(examples)
+        # Validate and deduplicate
+        examples = validate_examples(examples)
+
+        # Deterministic shuffle with seed
+        random.Random(self.config.seed).shuffle(examples)
         n = len(examples)
         n_train = max(1, int(n * 0.5))
         n_val = max(1, int(n * 0.25))
