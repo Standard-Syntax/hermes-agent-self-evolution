@@ -20,7 +20,7 @@ from rich.table import Table
 from evolution.core.config import EvolutionConfig
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
-from evolution.core.fitness import skill_fitness_metric
+from evolution.core.fitness import run_holdout_evaluation
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.optimizer import compile_skill_module
 from evolution.skills.skill_module import (
@@ -204,22 +204,107 @@ def evolve(
 
     baseline_scores = []
     evolved_scores = []
+    all_judge_feedback = []
     for ex in holdout_examples:
-        # Score baseline
+        # Score baseline and evolved using LLM judge
         with dspy.context(lm=lm):
             baseline_pred = baseline_module(task_input=ex.task_input)
-            baseline_score = skill_fitness_metric(ex, baseline_pred)
-            baseline_scores.append(baseline_score)
+            baseline_output = baseline_pred.output
 
             evolved_pred = optimized_module(task_input=ex.task_input)
-            evolved_score = skill_fitness_metric(ex, evolved_pred)
-            evolved_scores.append(evolved_score)
+            evolved_output = evolved_pred.output
+
+            result = run_holdout_evaluation(
+                baseline_output=baseline_output,
+                evolved_output=evolved_output,
+                task_input=ex.task_input,
+                expected_behavior=ex.expected_behavior,
+                skill_text=optimized_module.skill_text,
+                config=config,
+            )
+
+            baseline_scores.append(result["baseline_score"])
+            evolved_scores.append(result["evolved_score"])
+            all_judge_feedback.append(result["judge_feedback"])
 
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))
     improvement = avg_evolved - avg_baseline
 
-    # ── 9. Report results ───────────────────────────────────────────────
+    # ── 9. Improvement threshold gate ────────────────────────────────────
+    IMPROVEMENT_THRESHOLD = 0.10
+    run_status = "passed"
+    failed_gate = None
+
+    if improvement < IMPROVEMENT_THRESHOLD:
+        console.print(f"[red]✗ Improvement {improvement:.3f} below threshold {IMPROVEMENT_THRESHOLD:.1%}[/red]")
+        run_status = "failed"
+        failed_gate = "improvement_threshold"
+        output_dir = Path("output") / skill_name / "evolved_FAILED"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "evolved_skill.md").write_text(evolved_full)
+        (output_dir / "baseline_skill.md").write_text(skill["raw"])
+        metrics = {
+            "skill_name": skill_name,
+            "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+            "status": run_status,
+            "failed_gate": failed_gate,
+            "deployable": False,
+            "baseline_score": avg_baseline,
+            "evolved_score": avg_evolved,
+            "improvement": improvement,
+        }
+        (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        # Save constraints.json even on early return
+        early_constraints_data = {
+            "baseline_constraints": [
+                {
+                    "constraint_name": c.constraint_name,
+                    "passed": c.passed,
+                    "message": c.message,
+                    "details": c.details,
+                }
+                for c in baseline_constraints
+            ],
+            "evolved_constraints": [
+                {
+                    "constraint_name": c.constraint_name,
+                    "passed": c.passed,
+                    "message": c.message,
+                    "details": c.details,
+                }
+                for c in evolved_constraints
+            ],
+            "test_suite": None,
+            "benchmark": None,
+        }
+        (output_dir / "constraints.json").write_text(json.dumps(early_constraints_data, indent=2))
+        return  # Exit early — do not proceed to tests
+
+    # ── 10. Run test suite gate ───────────────────────────────────────
+    test_result = None
+    if run_tests:
+        console.print("\n[bold]Running test suite gate[/bold]")
+        test_result = validator.run_test_suite(resolved_hermes_path)
+        icon = "✓" if test_result.passed else "✗"
+        color = "green" if test_result.passed else "red"
+        console.print(f"  [{color}]{icon} test_suite[/{color}]: {test_result.message}")
+        if not test_result.passed:
+            run_status = "failed"
+            failed_gate = "test_suite"
+
+    # ── 12. Benchmark gate (optional TBLite) ─────────────────────────
+    benchmark_result = None
+    if config.run_tblite:
+        console.print("\n[bold]Running TBLite benchmark gate[/bold]")
+        # Note: TBLite integration is intentionally optional. Set run_tblite=True in config to enable.
+        # TODO: Implement TBLite benchmark check
+        # benchmark_result = run_tblite_benchmark(...)
+        # if benchmark_regression > config.tblite_regression_threshold:
+        #     run_status = "failed"
+        #     failed_gate = "benchmark"
+
+    # ── 13. Report results ───────────────────────────────────────────────
     table = Table(title="Evolution Results")
     table.add_column("Metric", style="bold")
     table.add_column("Baseline", justify="right")
@@ -245,9 +330,12 @@ def evolve(
     console.print()
     console.print(table)
 
-    # ── 10. Save output ─────────────────────────────────────────────────
+    # ── 12. Save output ─────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path("output") / skill_name / timestamp
+    if failed_gate:
+        output_dir = Path("output") / skill_name / "evolved_FAILED"
+    else:
+        output_dir = Path("output") / skill_name / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save evolved skill
@@ -276,8 +364,51 @@ def evolve(
         "holdout_examples": len(dataset.holdout),
         "elapsed_seconds": elapsed,
         "constraints_passed": all_pass,
+        "status": run_status,
+        "failed_gate": failed_gate,
+        "deployable": run_status == "passed",
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    # Save constraints.json
+    constraints_data = {
+        "baseline_constraints": [
+            {
+                "constraint_name": c.constraint_name,
+                "passed": c.passed,
+                "message": c.message,
+                "details": c.details,
+            }
+            for c in baseline_constraints
+        ],
+        "evolved_constraints": [
+            {
+                "constraint_name": c.constraint_name,
+                "passed": c.passed,
+                "message": c.message,
+                "details": c.details,
+            }
+            for c in evolved_constraints
+        ],
+        "test_suite": {
+            "passed": test_result.passed if test_result else None,
+            "message": test_result.message if test_result else None,
+        },
+        "benchmark": {
+            "passed": benchmark_result.passed if benchmark_result else None,
+            "regression": benchmark_result.regression if benchmark_result else None,
+        },
+    }
+    (output_dir / "constraints.json").write_text(json.dumps(constraints_data, indent=2))
+
+    # Save detailed judge feedback per example
+    (output_dir / "judge_feedback.md").write_text(
+        "# Holdout Evaluation Judge Feedback\n\n"
+        + "\n\n---\n\n".join(
+            f"## Example {i+1}\n\n{fb}"
+            for i, fb in enumerate(all_judge_feedback)
+        )
+    )
 
     console.print(f"\n  Output saved to {output_dir}/")
 
