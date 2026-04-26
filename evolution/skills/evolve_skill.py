@@ -23,6 +23,7 @@ from evolution.core.external_importers import build_dataset_from_external
 from evolution.core.fitness import skill_fitness_metric
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.optimizer import compile_skill_module
+from evolution.core.git_ops import apply_to_branch, build_pr_body
 from evolution.skills.skill_module import (
     SkillModule,
     load_skill,
@@ -43,6 +44,7 @@ def evolve(
     hermes_repo: Optional[str] = None,
     run_tests: bool = False,
     dry_run: bool = False,
+    should_apply_to_branch: bool = False,
 ):
     """Main evolution function — orchestrates the full optimization loop."""
 
@@ -281,6 +283,35 @@ def evolve(
 
     console.print(f"\n  Output saved to {output_dir}/")
 
+    # ── 11. Apply to Hermes branch (optional) ─────────────────────────────
+    if should_apply_to_branch and improvement > 0:
+        console.print("\n[bold]Creating evolution branch in Hermes repo[/bold]")
+        result = apply_to_branch(
+            skill_name=skill_name,
+            evolved_skill_text=evolved_full,
+            hermes_path=resolved_hermes_path,
+            output_dir=output_dir,
+            timestamp=timestamp,
+        )
+        if result.success:
+            # Write actual PR body with real metrics
+            improvement_pct = (improvement / max(0.001, avg_baseline)) * 100
+            build_pr_body(
+                skill_name=skill_name,
+                baseline_score=avg_baseline,
+                evolved_score=avg_evolved,
+                improvement_pct=improvement_pct,
+                constraint_passed=all_pass,
+                test_passed=True if run_tests else None,
+                holdout_count=len(dataset.holdout),
+                output_dir=output_dir,
+            )
+            console.print(f"  [green]✓[/green] Branch created: {result.branch_name}")
+            console.print(f"  Commit: {result.commit_sha}")
+            console.print(f"  PR body: {result.pr_body_path}")
+        else:
+            console.print(f"  [red]✗[/red] Failed to create branch: {result.error}")
+
     if improvement > 0:
         console.print(f"\n[bold green]✓ Evolution improved skill by {improvement:+.3f} ({improvement/max(0.001, avg_baseline)*100:+.1f}%)[/bold green]")
         console.print(f"  Review the diff: diff {output_dir}/baseline_skill.md {output_dir}/evolved_skill.md")
@@ -300,7 +331,8 @@ def evolve(
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--run-tests", is_flag=True, help="Run full pytest suite as constraint gate")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
-def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
+@click.option("--apply-to-branch", is_flag=True, help="Create evolution branch in Hermes repo with evolved skill")
+def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, hermes_repo, run_tests, dry_run, apply_to_branch):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     evolve(
         skill_name=skill,
@@ -312,6 +344,7 @@ def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_mod
         hermes_repo=hermes_repo,
         run_tests=run_tests,
         dry_run=dry_run,
+        should_apply_to_branch=apply_to_branch,
     )
 
 

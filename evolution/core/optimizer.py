@@ -9,7 +9,7 @@ import functools
 import dspy
 
 from evolution.core.config import EvolutionConfig
-from evolution.core.fitness import skill_fitness_metric
+from evolution.core.fitness import gepa_metric
 from evolution.skills.skill_module import SkillModule
 
 
@@ -35,8 +35,11 @@ def build_gepa_optimizer(config: EvolutionConfig) -> dspy.GEPA:
     Returns:
         dspy.GEPA configured with max_metric_calls and reflection_lm
     """
+    # Bind config into gepa_metric via functools.partial since GEPA metric
+    # signature doesn't include config (it expects gold, pred, trace, pred_name, pred_trace)
+    gepa_metric_with_config = functools.partial(gepa_metric, config=config)
     return dspy.GEPA(
-        metric=skill_fitness_metric,  # type: ignore[invalid-argument-type]
+        metric=gepa_metric_with_config,  # type: ignore[invalid-argument-type]
         max_metric_calls=config.max_metric_calls,
         reflection_lm=dspy.LM(config.optimizer_model),
     )
@@ -69,8 +72,10 @@ def compile_skill_module(
     """
     if not _gepa_available():
         # GEPA unavailable in this DSPy version - use MIPROv2 fallback
+        # Bind config into gepa_metric via functools.partial
+        gepa_metric_with_config = functools.partial(gepa_metric, config=config)
         optimizer = dspy.MIPROv2(
-            metric=skill_fitness_metric,
+            metric=gepa_metric_with_config,
             auto="light",
         )
         optimized_module = optimizer.compile(
