@@ -674,15 +674,6 @@ class TestGateEnforcement:
                                                     )
                                                     mock_validator_instance = MagicMock()
                                                     mock_validator_instance.run_test_suite = MagicMock(return_value=mock_test_result)
-                                                    constraint_result = ConstraintResult(
-                                                        passed=True,
-                                                        constraint_name="skill_structure",
-                                                        message="OK",
-                                                        details=None,
-                                                    )
-                                                    mock_validator_instance.validate_skill = MagicMock(
-                                                        return_value=[constraint_result],
-                                                    )
                                                     with mock.patch(
                                                         "evolution.skills.evolve_skill.ConstraintValidator",
                                                         return_value=mock_validator_instance,
@@ -827,15 +818,6 @@ class TestGateEnforcement:
                                                         )
                                                         mock_validator_instance = MagicMock()
                                                         mock_validator_instance.run_test_suite = MagicMock(return_value=mock_test_result)
-                                                        constraint_result = ConstraintResult(
-                                                            passed=True,
-                                                            constraint_name="skill_structure",
-                                                            message="OK",
-                                                            details=None,
-                                                        )
-                                                        mock_validator_instance.validate_skill = MagicMock(
-                                                            return_value=[constraint_result],
-                                                        )
                                                         with mock.patch(
                                                             "evolution.skills.evolve_skill.ConstraintValidator",
                                                             return_value=mock_validator_instance,
@@ -1136,17 +1118,17 @@ class TestGateEnforcement:
             constraints = json.loads(constraints_files[0].read_text())
 
             # constraints.json should contain both baseline and evolved constraint results
-            assert "baseline_results" in constraints, (
-                "constraints.json must contain 'baseline_results' key"
+            assert "baseline_constraints" in constraints, (
+                "constraints.json must contain 'baseline_constraints' key"
             )
-            assert "evolved_results" in constraints, (
-                "constraints.json must contain 'evolved_results' key"
+            assert "evolved_constraints" in constraints, (
+                "constraints.json must contain 'evolved_constraints' key"
             )
-            assert isinstance(constraints["baseline_results"], list), (
-                "baseline_results must be a list"
+            assert isinstance(constraints["baseline_constraints"], list), (
+                "baseline_constraints must be a list"
             )
-            assert isinstance(constraints["evolved_results"], list), (
-                "evolved_results must be a list"
+            assert isinstance(constraints["evolved_constraints"], list), (
+                "evolved_constraints must be a list"
             )
         finally:
             os.chdir(original_cwd)
@@ -1264,16 +1246,6 @@ class TestGateEnforcement:
                                                 )
                                                 mock_validator_instance = MagicMock()
                                                 mock_validator_instance.run_test_suite = MagicMock(return_value=mock_test_result)
-                                                # validate_skill returns real ConstraintResult lists for ArtifactWriter
-                                                constraint_result = ConstraintResult(
-                                                    passed=True,
-                                                    constraint_name="skill_structure",
-                                                    message="OK",
-                                                    details=None,
-                                                )
-                                                mock_validator_instance.validate_skill = MagicMock(
-                                                    return_value=[constraint_result],
-                                                )
                                                 with mock.patch(
                                                     "evolution.skills.evolve_skill.ConstraintValidator",
                                                     return_value=mock_validator_instance,
